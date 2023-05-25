@@ -1,6 +1,6 @@
 # https://github.com/cri-o/cri-o
 %global goipath         github.com/cri-o/cri-o
-Version:                1.26.3
+Version:                1.27.0
 
 %if 0%{?rhel} && 0%{?rhel} <= 9
 %define gobuild(o:) %{expand:
@@ -33,7 +33,7 @@ Version:                1.26.3
 %global service_name crio
 
 # Commit for the builds
-%global commit0 afec31f8173b63dd189911deff7dcef5d01621f8
+%global commit0 11d8079ee81fb928b37fdef01882bd6977d68d3d
 
 Name:           cri-o
 Epoch:          0
@@ -230,6 +230,9 @@ sed -i -e 's/,metacopy=on//g' /etc/containers/storage.conf
 %endif
 
 %changelog
+* Tue Apr 25 2023 Peter Hunt <pehunt@redhat.com> - 0:1.27.0-1
+- bump to v1.27.0
+
 * Mon Apr 10 2023 Peter Hunt <pehunt@redhat.com> - 0:1.26.3-1
 - bump to v1.26.3
 
