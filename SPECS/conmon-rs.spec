@@ -14,7 +14,7 @@
 
 Name: conmon-rs
 Version: 0.5.1
-Release: 1{?dist}
+Release: 1%{?dist}
 Summary: Container monitor in Rust
 License: ASL 2.0 and BSD and ISC and MIT
 URL: https://github.com/containers/conmon-rs
