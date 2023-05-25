@@ -18,7 +18,7 @@ Release: 1%{?dist}
 Summary: Container monitor in Rust
 License: ASL 2.0 and BSD and ISC and MIT
 URL: https://github.com/containers/conmon-rs
-Source0: https://github.com/containers/conmon-rs/archive/v%{version}.tar.gz#%{name}-%{version}.tar.gz
+Source0: https://github.com/containers/conmon-rs/archive/v%{version}/%{name}-%{version}.tar.gz
 
 BuildRequires: capnproto
 BuildRequires: cargo
