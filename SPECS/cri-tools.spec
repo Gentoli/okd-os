@@ -1,6 +1,6 @@
 # https://github.com/cri-o/cri-o
 %global goipath         github.com/kubernetes-sigs/cri-tools
-Version:                1.27.0
+Version:                1.27.1
 
 %if 0%{?rhel} && 0%{?rhel} <= 8
 %define gobuild(o:) %{expand:
@@ -66,6 +66,9 @@ install -p -m 644 docs/crictl.1 %{buildroot}%{_mandir}/man1
 %{_mandir}/man1/crictl*
 
 %changelog
+* Tue Oct 24 2023 Christian Glombek <cglombek@redhat.com> - 1.27.1-1
+- Bump to 1.27.1
+
 * Thu May 25 2023 Christian Glombek <cglombek@redhat.com> - 1.27.0-1
 - Bump to 1.27.0
 
