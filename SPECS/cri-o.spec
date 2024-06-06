@@ -1,6 +1,13 @@
 # https://github.com/cri-o/cri-o
 %global goipath         github.com/cri-o/cri-o
-Version:                1.28.2
+%global service_name    crio
+
+# Related: github.com/cri-o/cri-o/issues/3684
+%global build_timestamp %(date -u +'%Y-%m-%dT%H:%M:%SZ')
+%global git_tree_state  clean
+%global criocli_path    ""
+
+Version:        1.29.5
 
 %if 0%{?rhel} && 0%{?rhel} <= 9
 %define gobuild(o:) %{expand:
@@ -18,28 +25,13 @@ Version:                1.28.2
 %bcond_without check
 %endif
 
-# Related: github.com/cri-o/cri-o/issues/3684
-%global build_timestamp %(date -u +'%Y-%m-%dT%H:%M:%SZ')
-%global git_tree_state clean
-%global criocli_path ""
-
-# Used for comparing with latest upstream tag
-# to decide whether to autobuild (non-rawhide only)
-%global built_tag v%{version}
-%global built_tag_strip %(b=%{built_tag}; echo ${b:1})
-%global crio_release_tag %(echo %{built_tag_strip} | cut -f1,2 -d'.')
-
-# Services
-%global service_name crio
-
 # Commit for the builds
-%global commit0 e7be4e160f3cc3810b3f6c9fbf225697d772a9ad
+%global commit0 b043c66fe29e023a4c4bd2f5b27a790c86a2ec59
 
 Name:           cri-o
 Epoch:          0
 Release:        1%{?dist}
 Summary:        Open Container Initiative-based implementation of Kubernetes Container Runtime Interface
-
 
 # Upstream license specification: Apache-2.0
 License:        ASL 2.0
@@ -199,11 +191,10 @@ sed -i -e 's/,metacopy=on//g' /etc/containers/storage.conf
 %systemd_postun_with_restart %{service_name}
 
 %files
-%license LICENSE
+%license LICENSE vendor/modules.txt
 %doc docs code-of-conduct.md tutorial.md ADOPTERS.md CONTRIBUTING.md README.md
 %doc awesome.md transfer.md
 %{_bindir}/%{service_name}
-%{_bindir}/%{service_name}-status
 %{_bindir}/pinns
 %{_mandir}/man5/%{service_name}.conf*5*
 %{_mandir}/man8/%{service_name}*.8*
@@ -230,6 +221,9 @@ sed -i -e 's/,metacopy=on//g' /etc/containers/storage.conf
 %endif
 
 %changelog
+* Thu Jun 06 2024 Christian Glombek <cglombek@redhat.com> - 0:1.29.5-1
+- bump to v1.29.5
+
 * Mon Dec 04 2023 Christian Glombek <cglombek@redhat.com> - 0:1.28.2-1
 - bump to v1.28.2
 
