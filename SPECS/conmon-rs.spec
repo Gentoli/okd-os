@@ -13,20 +13,19 @@
 %global bin_name conmonrs
 
 Name: conmon-rs
-Version: 0.5.1
+Version: 0.6.6
 Release: 1%{?dist}
 Summary: Container monitor in Rust
 License: ASL 2.0 and BSD and ISC and MIT
 URL: https://github.com/containers/conmon-rs
-Source0: https://github.com/containers/conmon-rs/releases/download/v%{version}/%{name}-%{version}.tar.gz
+Source0: https://github.com/containers/conmon-rs/releases/download/v%{version}/%{bin_name}-v%{version}.tar.gz
 # Only for CentOS/RHEL builds
-Source1: https://github.com/containers/conmon-rs/releases/download/v%{version}/%{bin_name}-v%{version}-vendor.tar.gz
 BuildRequires: capnproto
 BuildRequires: cargo
 BuildRequires: git-core
 BuildRequires: make
 BuildRequires: protobuf-compiler
-%if 0%{?rhel}
+%if "0%{?rhel}"
 BuildRequires:  rust-toolset
 %else
 BuildRequires:  rust-packaging
@@ -38,14 +37,14 @@ ExclusiveArch: %{rust_arches}
 %{summary}.
 
 %prep
-%autosetup -n %{name}-%{version}
-%if 0%{?rhel}
+%autosetup -n %{bin_name}-v%{version}
+%if "0%{?rhel}"
 %cargo_prep -V 1
 %else
 %cargo_prep
 %endif
 
-%if !0%{?rhel}
+%if !"0%{?rhel}"
 %generate_buildrequires
 %cargo_generate_buildrequires
 %endif
@@ -61,5 +60,8 @@ ExclusiveArch: %{rust_arches}
 %{_bindir}/%{bin_name}
 
 %changelog
+* Fri Oct 25 2024 Dennis Gilmore <dennis@ausil.us> - 0.6.6-1
+- update to 0.6.6
+
 * Thu May 25 2023 Christian Glombek <cglombek@redhat.com> - 0.5.1-1
 - Initial Release
