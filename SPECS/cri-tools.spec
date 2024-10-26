@@ -2,23 +2,16 @@
 %global goipath         github.com/kubernetes-sigs/cri-tools
 Version:                1.31.1
 
-%if 0%{?rhel} && 0%{?rhel} <= 8
-%define gobuild(o:) %{expand:
-  # https://bugzilla.redhat.com/show_bug.cgi?id=995136#c12
-  %global _dwz_low_mem_die_limit 0
-  %ifnarch ppc64
-  go build -buildmode pie -compiler gc -tags="rpm_crashtraceback ${BUILDTAGS:-}" -ldflags "${LDFLAGS:-}%{?currentgoldflags} -B 0x$(head -c20 /dev/urandom|od -An -tx1|tr -d ' \\n') -extldflags '%__global_ldflags %{?__golang_extldflags}' -compressdwarf=false" -a -v -x %{?**};
-  %else
-  go build                -compiler gc -tags="rpm_crashtraceback ${BUILDTAGS:-}" -ldflags "${LDFLAGS:-}%{?currentgoldflags} -B 0x$(head -c20 /dev/urandom|od -An -tx1|tr -d ' \\n') -extldflags '%__global_ldflags %{?__golang_extldflags}' -compressdwarf=false" -a -v -x %{?**};
-  %endif
-}
+%define gobuild(o:) go build -buildmode pie -compiler gc -tags="rpm_crashtraceback libtrust_openssl ${BUILDTAGS:-}" -ldflags "${LDFLAGS:-} -linkmode=external -compressdwarf=false -B 0x$(head -c20 /dev/urandom|od -An -tx1|tr -d ' \\n') -extldflags '%__global_ldflags'" -a -v -x %{?**};
+
 %bcond_with check
-%else
-%gometa
-%bcond_without check
-%endif
 
 %global built_tag v%{version}
+%global provider github
+%global provider_tld com
+%global project kubernetes-sigs
+%global repo cri-tools
+%global import_path sigs.k8s.io/%{repo}
 
 Name: %{repo}
 Release: 1%{?dist}
@@ -32,22 +25,27 @@ ExclusiveArch: %{?go_arches:%{go_arches}}%{!?go_arches:%{ix86} x86_64 aarch64 %{
 BuildRequires: golang
 BuildRequires: glibc-static
 BuildRequires: git
-BuildRequires: go-md2man
 Provides: crictl = %{version}-%{release}
 
 %description
 %{summary}
 
 %prep
-%if 0%{?rhel} && 0%{?rhel} <= 8
 %autosetup -p1 -n %{name}-%{version}
-%else
-%goprep -k
-%endif
 
 %build
-%gobuild -o bin/crictl %{goipath}/cmd/crictl
-go-md2man -in docs/crictl.md -out docs/crictl.1
+mkdir _build
+pushd _build
+mkdir -p src/sigs.k8s.io
+ln -s ../../../ src/%{import_path}
+popd
+ln -s vendor src
+export GOPATH=$(pwd)/_build:$(pwd)
+export GO111MODULE=off
+export LDFLAGS+=" -X %{import_path}/pkg/version.Version=%version"
+
+GOPATH=$GOPATH %gobuild -o bin/crictl %{import_path}/cmd/crictl
+bin/crictl completion > docs/crictl-completions
 
 %install
 # install binaries
