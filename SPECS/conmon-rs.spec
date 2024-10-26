@@ -19,7 +19,6 @@ Summary: Container monitor in Rust
 License: ASL 2.0 and BSD and ISC and MIT
 URL: https://github.com/containers/conmon-rs
 Source0: https://github.com/containers/conmon-rs/releases/download/v%{version}/%{bin_name}-v%{version}.tar.gz
-# Only for CentOS/RHEL builds
 BuildRequires: capnproto
 BuildRequires: cargo
 BuildRequires: git-core
@@ -38,16 +37,6 @@ ExclusiveArch: %{rust_arches}
 
 %prep
 %autosetup -n %{bin_name}-v%{version}
-%if "0%{?rhel}"
-%cargo_prep -V 1
-%else
-%cargo_prep
-%endif
-
-%if !"0%{?rhel}"
-%generate_buildrequires
-%cargo_generate_buildrequires
-%endif
 
 %build
 %{__make} release
