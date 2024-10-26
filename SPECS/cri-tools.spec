@@ -1,6 +1,6 @@
 # https://github.com/cri-o/cri-o
 %global goipath         github.com/kubernetes-sigs/cri-tools
-Version:                1.30.1
+Version:                1.31.1
 
 %if 0%{?rhel} && 0%{?rhel} <= 8
 %define gobuild(o:) %{expand:
@@ -66,6 +66,9 @@ install -p -m 644 docs/crictl.1 %{buildroot}%{_mandir}/man1
 %{_mandir}/man1/crictl*
 
 %changelog
+* Fri Oct 25 2024 Dennis Gilmore <dennis@ausil.us> - 1.31.1-1
+- update to 1.31.1
+
 * Fri Oct 25 2024 Dennis Gilmore <dennis@ausil.us> - 1.30.1-1
 - update to 1.30.1
 
