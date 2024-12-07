@@ -7,7 +7,7 @@
 %global git_tree_state  clean
 %global criocli_path    ""
 
-Version:        1.31.1
+Version:        1.31.3
 
 %if 0%{?rhel} && 0%{?rhel} <= 9
 %define gobuild(o:) %{expand:
@@ -221,6 +221,9 @@ sed -i -e 's/,metacopy=on//g' /etc/containers/storage.conf
 %endif
 
 %changelog
+* Fri Dec 06 2024 Dennis Gilmore <dennis@ausil.us> - 0:1.31.3-1
+- update to v1.31.3
+
 * Thu Oct 24 2024 Dennis Gilmore <dennis@ausil.us> - 0:1.31.1-1
 - update to v1.31.1
 
