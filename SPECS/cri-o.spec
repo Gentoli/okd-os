@@ -30,7 +30,7 @@ Version:        1.31.3
 
 Name:           cri-o
 Epoch:          0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Open Container Initiative-based implementation of Kubernetes Container Runtime Interface
 
 # Upstream license specification: Apache-2.0
@@ -221,6 +221,9 @@ sed -i -e 's/,metacopy=on//g' /etc/containers/storage.conf
 %endif
 
 %changelog
+* Sat Dec 07 2024 Dennis Gilmore <dennis@ausil.us> - 0:1.31.3-2
+- rebuild to enable s390x
+
 * Fri Dec 06 2024 Dennis Gilmore <dennis@ausil.us> - 0:1.31.3-1
 - update to v1.31.3
 
