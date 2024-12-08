@@ -15,7 +15,7 @@ Version:                1.31.1
 %gometa -f
 
 Name: %{repo}
-Release: 1%{?dist}
+Release: 2%{?dist}
 Summary: CLI and validation tools for Container Runtime Interface
 License: ASL 2.0
 URL:     https://%{goipath}
@@ -77,6 +77,9 @@ install -p -m 644 docs/crictl-completions %{buildroot}%{_datadir}/bash-completio
 
 
 %changelog
+* Sat Dec 07 2024 Dennis Gilmore <dennis@ausil.us> - 1.31.1-2
+- rebuild to enable s390x
+
 * Fri Oct 25 2024 Dennis Gilmore <dennis@ausil.us> - 1.31.1-1
 - update to 1.31.1
 
