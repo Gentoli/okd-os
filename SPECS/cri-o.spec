@@ -9,7 +9,7 @@
 
 Version:        1.32.2
 
-%if 0%{?rhel} && 0%{?rhel} <= 9
+%if 0%{?rhel} && 0%{?rhel} <= 10
 %define gobuild(o:) %{expand:
   # https://bugzilla.redhat.com/show_bug.cgi?id=995136#c12
   %global _dwz_low_mem_die_limit 0
@@ -30,7 +30,7 @@ Version:        1.32.2
 
 Name:           cri-o
 Epoch:          0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Open Container Initiative-based implementation of Kubernetes Container Runtime Interface
 
 # Upstream license specification: Apache-2.0
@@ -40,10 +40,6 @@ Source0:        %url/archive/v%{version}/%{name}-%{version}.tar.gz
 
 %if 0%{?rhel}
 BuildRequires:  golang >= 1.19
-%endif
-%if 0%{?rhel} && 0%{?rhel} <= 8
-# e.g. el6 has ppc64 arch without gcc-go, so EA tag is required
-ExclusiveArch:  %{?go_arches:%{go_arches}}%{!?go_arches:%{ix86} x86_64 aarch64 %{arm}}
 %endif
 %if 0%{?fedora}
 BuildRequires:  btrfs-progs-devel
@@ -57,11 +53,7 @@ BuildRequires:  go-md2man
 BuildRequires:  gpgme-devel
 BuildRequires:  libassuan-devel
 BuildRequires:  libseccomp-devel
-%if 0%{?rhel} && 0%{?rhel} < 8
-BuildRequires:  systemd-devel
-%else
 BuildRequires:  systemd-rpm-macros
-%endif
 BuildRequires:  make
 %if 0%{?fedora}
 Requires(pre):  container-selinux
@@ -69,13 +61,8 @@ Requires(pre):  container-selinux
 Requires:       container-selinux
 %endif
 Requires:       containers-common >= 1:0.1.31-14
-%if 0%{?rhel} && 0%{?rhel} < 8
-Requires:       runc >= 1.0.0-16
-Requires:       containernetworking-plugins >= 1.0.0-1
-%else
 Recommends:     runc >= 1.0.0-16
 Suggests:       containernetworking-plugins >= 1.0.0-1
-%endif
 Requires:       conmon >= 2.0.2-1
 Requires:       socat
 
@@ -88,7 +75,7 @@ Open Container Initiative-based implementation of Kubernetes Container Runtime
 Interface.
 
 %prep
-%if 0%{?rhel} && 0%{?rhel} <= 9
+%if 0%{?rhel} && 0%{?rhel} <= 10
 %autosetup -p1 -n %{name}-%{version}
 %else
 %goprep -k
@@ -111,10 +98,6 @@ $(hack/btrfs_tag.sh) $(hack/libdm_installed.sh)
 $(hack/libdm_no_deferred_remove_tag.sh)
 $(hack/seccomp_tag.sh)
 $(hack/selinux_tag.sh)"
-
-%if 0%{?rhel}  && 0%{?rhel} <= 8
-BUILDTAGS="$BUILDTAGS containers_image_openpgp"
-%endif
 
 export BASE_LDFLAGS="-X %{goipath}/internal/pkg/criocli.DefaultsPath=%{criocli_path}
 -X  %{goipath}/internal/version.buildDate=%{build_timestamp}
@@ -167,21 +150,9 @@ install -p -m 644 crictl.yaml %{buildroot}%{_sysconfdir}
             install.man \
             install.systemd
 
-%if 0%{?rhel} && 0%{?rhel} <= 7
-# https://bugzilla.redhat.com/show_bug.cgi?id=1823374#c17
-install -d -p %{buildroot}%{_prefix}/lib/sysctl.d
-echo "fs.may_detach_mounts=1" > %{buildroot}%{_prefix}/lib/sysctl.d/99-cri-o.conf
-%endif
-
 install -dp %{buildroot}%{_sharedstatedir}/containers
 
 %post
-# Old verions of kernel do not recognize metacopy option.
-# Reference: github.com/cri-o/cri-o/issues/3631
-%if 0%{?rhel} && 0%{?rhel} <= 7
-sed -i -e 's/,metacopy=on//g' /etc/containers/storage.conf
-%sysctl_apply 99-cri-o.conf
-%endif
 %systemd_post %{service_name}
 
 %preun
@@ -216,11 +187,12 @@ sed -i -e 's/,metacopy=on//g' /etc/containers/storage.conf
 %{_datadir}/bash-completion/completions/%{service_name}*
 %{_datadir}/fish/completions/%{service_name}*.fish
 %{_datadir}/zsh/site-functions/_%{service_name}*
-%if 0%{?rhel} && 0%{?rhel} <= 7
-%{_prefix}/lib/sysctl.d/99-cri-o.conf
-%endif
 
 %changelog
+* Tue Mar 11 2025 Dennis Gilmore <dennis@ausil.us> = 0:1.32.2-2
+- drop RHEL macros for old RHEL/CentOS versions
+- do not use go macros on el10 as there are some issues
+
 * Tue Mar 11 2025 Dennis Gilmore <dennis@ausil.us> = 0:1.32.2-1
 - update to v1.32.2
 
