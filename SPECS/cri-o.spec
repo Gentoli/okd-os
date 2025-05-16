@@ -7,7 +7,7 @@
 %global git_tree_state  clean
 %global criocli_path    ""
 
-Version:        1.32.2
+Version:        1.33.0
 
 %if 0%{?rhel} && 0%{?rhel} <= 10
 %define gobuild(o:) %{expand:
@@ -30,7 +30,7 @@ Version:        1.32.2
 
 Name:           cri-o
 Epoch:          0
-Release:        2%{?dist}
+Release:        1%{?dist}
 Summary:        Open Container Initiative-based implementation of Kubernetes Container Runtime Interface
 
 # Upstream license specification: Apache-2.0
@@ -189,11 +189,14 @@ install -dp %{buildroot}%{_sharedstatedir}/containers
 %{_datadir}/zsh/site-functions/_%{service_name}*
 
 %changelog
-* Tue Mar 11 2025 Dennis Gilmore <dennis@ausil.us> = 0:1.32.2-2
+* Fri May 16 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.33.0-1
+- update to v1.33.0
+
+* Tue Mar 11 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.32.2-2
 - drop RHEL macros for old RHEL/CentOS versions
 - do not use go macros on el10 as there are some issues
 
-* Tue Mar 11 2025 Dennis Gilmore <dennis@ausil.us> = 0:1.32.2-1
+* Tue Mar 11 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.32.2-1
 - update to v1.32.2
 
 * Sat Dec 07 2024 Dennis Gilmore <dennis@ausil.us> - 0:1.31.3-2
