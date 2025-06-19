@@ -30,7 +30,7 @@ Version:        1.33.1
 
 Name:           cri-o
 Epoch:          0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Open Container Initiative-based implementation of Kubernetes Container Runtime Interface
 
 # Upstream license specification: Apache-2.0
@@ -152,6 +152,8 @@ install -p -m 644 crictl.yaml %{buildroot}%{_sysconfdir}
 
 install -dp %{buildroot}%{_sharedstatedir}/containers
 
+install -dp %{buildroot}%{_libexecdir}/cni
+
 %post
 %systemd_post %{service_name}
 
@@ -187,9 +189,13 @@ install -dp %{buildroot}%{_sharedstatedir}/containers
 %{_datadir}/bash-completion/completions/%{service_name}*
 %{_datadir}/fish/completions/%{service_name}*.fish
 %{_datadir}/zsh/site-functions/_%{service_name}*
+%dir %{_libexecdir}/cni
 
 %changelog
-* Thu Jun 12 3025 Dennis Gilmore <dennis@ausil.us> - 0:1.33.1-1
+* Wed Jun 18 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.33.1-2
+- make and provide %%{_libexecdir}/cni for OKD on SCOS 10
+
+* Thu Jun 12 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.33.1-1
 - update to 1.33.1
 
 * Fri May 16 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.33.0-1
