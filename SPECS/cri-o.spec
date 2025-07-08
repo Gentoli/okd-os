@@ -30,7 +30,7 @@ Version:        1.33.1
 
 Name:           cri-o
 Epoch:          0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        Open Container Initiative-based implementation of Kubernetes Container Runtime Interface
 
 # Upstream license specification: Apache-2.0
@@ -62,7 +62,6 @@ Requires:       container-selinux
 %endif
 Requires:       containers-common >= 1:0.1.31-14
 Recommends:     runc >= 1.0.0-16
-Suggests:       containernetworking-plugins >= 1.0.0-1
 Requires:       conmon >= 2.0.2-1
 Requires:       socat
 
@@ -121,7 +120,6 @@ sed -i 's/\/local//' contrib/systemd/%{service_name}.service
 bin/%{service_name} \
       --selinux \
       --cni-plugin-dir /opt/cni/bin \
-      --cni-plugin-dir "%{_libexecdir}/cni" \
       --enable-metrics \
       --metrics-port 9537 \
       config > %{service_name}.conf
@@ -151,8 +149,6 @@ install -p -m 644 crictl.yaml %{buildroot}%{_sysconfdir}
             install.systemd
 
 install -dp %{buildroot}%{_sharedstatedir}/containers
-
-install -dp %{buildroot}%{_libexecdir}/cni
 
 %post
 %systemd_post %{service_name}
@@ -189,9 +185,11 @@ install -dp %{buildroot}%{_libexecdir}/cni
 %{_datadir}/bash-completion/completions/%{service_name}*
 %{_datadir}/fish/completions/%{service_name}*.fish
 %{_datadir}/zsh/site-functions/_%{service_name}*
-%dir %{_libexecdir}/cni
 
 %changelog
+* Mon Jul 07 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.33.1-3
+- drop all references to %%{_libexecdir}/cni and containernetworking-plugins
+
 * Wed Jun 18 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.33.1-2
 - make and provide %%{_libexecdir}/cni for OKD on SCOS 10
 
