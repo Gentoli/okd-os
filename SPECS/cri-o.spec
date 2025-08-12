@@ -7,7 +7,7 @@
 %global git_tree_state  clean
 %global criocli_path    ""
 
-Version:        1.33.1
+Version:        1.33.3
 
 %if 0%{?rhel} && 0%{?rhel} <= 10
 %define gobuild(o:) %{expand:
@@ -30,7 +30,7 @@ Version:        1.33.1
 
 Name:           cri-o
 Epoch:          0
-Release:        3%{?dist}
+Release:        1%{?dist}
 Summary:        Open Container Initiative-based implementation of Kubernetes Container Runtime Interface
 
 # Upstream license specification: Apache-2.0
@@ -187,6 +187,9 @@ install -dp %{buildroot}%{_sharedstatedir}/containers
 %{_datadir}/zsh/site-functions/_%{service_name}*
 
 %changelog
+* Tue Aug 12 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.33.3-1
+- update to 1.33.3
+
 * Mon Jul 07 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.33.1-3
 - drop all references to %%{_libexecdir}/cni and containernetworking-plugins
 
