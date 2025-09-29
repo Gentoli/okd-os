@@ -1,6 +1,6 @@
 # https://github.com/cri-o/cri-o
 %global goipath         github.com/kubernetes-sigs/cri-tools
-Version:                1.33.0
+Version:                1.34.0
 
 %define gobuild(o:) go build -buildmode pie -compiler gc -tags="rpm_crashtraceback libtrust_openssl ${BUILDTAGS:-}" -ldflags "${LDFLAGS:-} -linkmode=external -compressdwarf=false -B 0x$(head -c20 /dev/urandom|od -An -tx1|tr -d ' \\n') -extldflags '%__global_ldflags'" -a -v -x %{?**};
 
@@ -77,6 +77,9 @@ install -p -m 644 docs/crictl-completions %{buildroot}%{_datadir}/bash-completio
 
 
 %changelog
+* Mon Sep 29 2025 Dennis Gilmore <dennis@ausil.us> - 1.34.0-1
+- update to 1.34.0
+
 * Wed May 07 2025 Dennis Gilmore <dennis@ausil.us> - 1.33.0-1
 - update to 1.33.0
 
