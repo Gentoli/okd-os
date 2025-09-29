@@ -7,7 +7,7 @@
 %global git_tree_state  clean
 %global criocli_path    ""
 
-Version:        1.33.3
+Version:        1.34.0
 
 %if 0%{?rhel} && 0%{?rhel} <= 10
 %define gobuild(o:) %{expand:
@@ -187,6 +187,9 @@ install -dp %{buildroot}%{_sharedstatedir}/containers
 %{_datadir}/zsh/site-functions/_%{service_name}*
 
 %changelog
+* Mon Sep 29 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.34.0-1
+- update to 1.34.0
+
 * Tue Aug 12 2025 Dennis Gilmore <dennis@ausil.us> - 0:1.33.3-1
 - update to 1.33.3
 
