@@ -12,13 +12,36 @@ on:
         description: 'Version to build'
         required: false
         default: '6.12.0-243.el10'
+      release_image:
+        description: 'Release image to extract base images from'
+        required: false
+        default: 'quay.io/okd/scos-release@sha256:ea8a1ccc0173d6d880a7ce880b11f954fa18fda74afe8c2ce7ce48086e94101b'
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  extract-base-images:
+    runs-on: ubuntu-latest
+    outputs:
+      stream-coreos: ${{ steps.extract.outputs.stream-coreos }}
+      driver-toolkit: ${{ steps.extract.outputs.driver-toolkit }}
+    steps:
+      - name: Install oc
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: "4"
+
+      - name: Extract base images
+        id: extract
+        run: |
+          PAYLOAD="${{ github.event.inputs.release_image || 'quay.io/okd/scos-release@sha256:ea8a1ccc0173d6d880a7ce880b11f954fa18fda74afe8c2ce7ce48086e94101b' }}"
+          echo "stream-coreos=$(oc adm release info --image-for stream-coreos $PAYLOAD)" >> $GITHUB_OUTPUT
+          echo "driver-toolkit=$(oc adm release info --image-for driver-toolkit $PAYLOAD)" >> $GITHUB_OUTPUT
+
   build-and-push:
+    needs: extract-base-images
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -66,3 +89,4 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ env.VERSION }}
+            BASE_IMAGE=${{ needs.extract-base-images.outputs[matrix.image_name] }}

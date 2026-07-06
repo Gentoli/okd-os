@@ -1,5 +1,6 @@
 # oc adm release info --image-for driver-toolkit
-FROM quay.io/okd/scos-content@sha256:9e78b79220dcc456cf9ae3b5ba0c88f8e6576cd46b1312503a34a0b916e8444b
+ARG BASE_IMAGE=quay.io/okd/scos-content@sha256:9e78b79220dcc456cf9ae3b5ba0c88f8e6576cd46b1312503a34a0b916e8444b
+FROM ${BASE_IMAGE}
 
 ARG VERSION="6.12.0-243.el10"
 

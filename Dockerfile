@@ -1,5 +1,6 @@
 # oc adm release info --image-for stream-coreos
-FROM quay.io/okd/scos-content@sha256:ea9c3617059d50829367a3b6fad651bfee2513986828cf1a181bfea5f0818643
+ARG BASE_IMAGE=quay.io/okd/scos-content@sha256:ea9c3617059d50829367a3b6fad651bfee2513986828cf1a181bfea5f0818643
+FROM ${BASE_IMAGE}
 
 ARG VERSION="6.12.0-243.el10"
 
