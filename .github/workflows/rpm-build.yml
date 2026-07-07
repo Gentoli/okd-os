@@ -32,7 +32,8 @@ jobs:
             make \
             golang \
             krb5-devel \
-            bsdtar
+            bsdtar \
+            systemd
 
       - name: Checkout openshift/kubernetes
         uses: actions/checkout@v4
