@@ -1,0 +1,62 @@
+name: RPM Build Reproduction
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-rpms:
+    name: Build RPMs (CentOS Stream ${{ matrix.os_version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os_version: [9, 10]
+    container:
+      image: quay.io/centos/centos:stream${{ matrix.os_version }}
+    steps:
+      - name: Checkout openshift/kubernetes
+        uses: actions/checkout@v4
+        with:
+          repository: openshift/kubernetes
+          ref: release-4.21
+
+      - name: Install Build Toolchain
+        run: |
+          dnf install -y \
+            rpm-build \
+            rpmlint \
+            rsync \
+            createrepo \
+            gcc \
+            gcc-c++ \
+            make \
+            golang \
+            krb5-devel \
+            bsdtar \
+            git
+
+      - name: Build RPMs
+        run: |
+          echo "Starting real Kubernetes RPM build for CentOS Stream ${{ matrix.os_version }}..."
+          
+          # The official script handles the full lifecycle:
+          # 1. make all (apiserver, controller-manager, scheduler, kubelet)
+          # 2. rpmbuild
+          # 3. createrepo
+          
+          # We need to set OS_GIT_VARS to satisfy the spec file's requirements
+          export OS_GIT_VARS="OS_GIT_VERSION=v1.30.0 OS_GIT_COMMIT=abcdef OS_GIT_MAJOR=1 OS_GIT_MINOR=30"
+          
+          ./openshift-hack/build-rpms.sh
+          
+      - name: Archive RPM Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-rpms-el${{ matrix.os_version }}
+          path: _output/local/releases/rpms/
