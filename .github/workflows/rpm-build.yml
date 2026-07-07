@@ -24,13 +24,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: openshift/kubernetes
-          ref: release-4.21
+          ref: master
 
       - name: Install Build Toolchain
         run: |
           dnf install -y \
             rpm-build \
-            rpmlint \
             rsync \
             createrepo \
             gcc \
@@ -45,13 +44,19 @@ jobs:
         run: |
           echo "Starting real Kubernetes RPM build for CentOS Stream ${{ matrix.os_version }}..."
           
-          # The official script handles the full lifecycle:
-          # 1. make all (apiserver, controller-manager, scheduler, kubelet)
-          # 2. rpmbuild
-          # 3. createrepo
+          # Fix git ownership issue in container
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           
-          # We need to set OS_GIT_VARS to satisfy the spec file's requirements
-          export OS_GIT_VARS="OS_GIT_VERSION=v1.30.0 OS_GIT_COMMIT=abcdef OS_GIT_MAJOR=1 OS_GIT_MINOR=30"
+          # Extract version from Dockerfile.rhel
+          VERSION=$(sed -rn 's/.*io.openshift.build.versions="kubernetes=(1.[0-9]+.[0-9]+(-rc.[0-9])?)"/v\1/p' openshift-hack/images/hyperkube/Dockerfile.rhel)
+          COMMIT=$(git rev-parse --short HEAD)
+          
+          export OS_GIT_VERSION="${VERSION}+${COMMIT}"
+          export OS_GIT_COMMIT="${COMMIT}"
+          export OS_GIT_MAJOR=$(echo $VERSION | cut -d. -f1 | sed 's/v//')
+          export OS_GIT_MINOR=$(echo $VERSION | cut -d. -f2)
+          export OS_GIT_PATCH=$(echo $VERSION | cut -d. -f3)
+          export OS_GIT_TREE_STATE="clean"
           
           ./openshift-hack/build-rpms.sh
           
