@@ -11,12 +11,35 @@ on:
 
 jobs:
   build-rpms:
-    name: Build RPMs (CentOS Stream ${{ matrix.os_version }})
+    name: Build ${{ matrix.component.name }} (EL${{ matrix.os_version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         os_version: [9, 10]
+        component:
+          - name: kubernetes
+            repository: openshift/kubernetes
+            ref: master
+            build_script: openshift-hack/build-rpms.sh
+          - name: cri-o
+            repository: cri-o/cri-o
+            ref: main
+            build_script: hack/build-rpms.sh
+          - name: cri-tools
+            repository: kubernetes-sigs/cri-tools
+            ref: master
+          - name: oc
+            repository: openshift/oc
+            ref: main
+            spec_file: oc.spec
+          - name: conmon-rs
+            repository: containers/conmon-rs
+            ref: main
+          - name: crio-credential-provider
+            repository: openshift/crio-credential-provider
+            ref: main
+            spec_file: crio-credential-provider.spec
     container:
       image: quay.io/centos/centos:stream${{ matrix.os_version }}
     steps:
@@ -33,46 +56,78 @@ jobs:
             golang \
             krb5-devel \
             bsdtar \
-            systemd
+            systemd \
+            tito \
+            cargo \
+            findutils \
+            dnf-plugins-core
 
-      - name: Checkout openshift/kubernetes
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          repository: openshift/kubernetes
-          ref: master
+          repository: ${{ matrix.component.repository }}
+          ref: ${{ matrix.component.ref }}
           fetch-depth: 1
 
       - name: Build RPMs
         run: |
-          echo "Starting real Kubernetes RPM build for CentOS Stream ${{ matrix.os_version }}..."
+          echo "Starting build for ${{ matrix.component.name }} on CentOS Stream ${{ matrix.os_version }}..."
           
           # Fix git ownership issue in container
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           
-          # Extract version from Dockerfile.rhel
-          VERSION_RAW=$(sed -rn 's/.*io.openshift.build.versions="kubernetes=(1.[0-9]+.[0-9]+(-rc.[0-9])?)"/\1/p' openshift-hack/images/hyperkube/Dockerfile.rhel)
-          COMMIT=$(git rev-parse --short HEAD)
-          
-          # Ensure VERSION starts with 'v' for the build script logic
-          VERSION="v${VERSION_RAW}"
-          
-          export OS_GIT_VERSION="${VERSION}+${COMMIT}"
-          export OS_GIT_COMMIT="${COMMIT}"
-          export OS_GIT_MAJOR=$(echo $VERSION_RAW | cut -d. -f1)
-          export OS_GIT_MINOR=$(echo $VERSION_RAW | cut -d. -f2)
-          export OS_GIT_PATCH=$(echo $VERSION_RAW | cut -d. -f3)
-          export OS_GIT_TREE_STATE="clean"
-          
-          # Print for debugging
-          echo "Build Metadata:"
-          echo "  OS_GIT_VERSION: $OS_GIT_VERSION"
-          echo "  OS_GIT_MAJOR: $OS_GIT_MAJOR"
-          echo "  OS_GIT_MINOR: $OS_GIT_MINOR"
-          
-          ./openshift-hack/build-rpms.sh
+          if [ "${{ matrix.component.name }}" == "kubernetes" ]; then
+            # Special metadata handling for Kubernetes
+            VERSION_RAW=$(sed -rn 's/.*io.openshift.build.versions="kubernetes=(1.[0-9]+.[0-9]+(-rc.[0-9])?)"/\1/p' openshift-hack/images/hyperkube/Dockerfile.rhel)
+            COMMIT=$(git rev-parse --short HEAD)
+            VERSION="v${VERSION_RAW}"
+            
+            export OS_GIT_VERSION="${VERSION}+${COMMIT}"
+            export OS_GIT_COMMIT="${COMMIT}"
+            export OS_GIT_MAJOR=$(echo $VERSION_RAW | cut -d. -f1)
+            export OS_GIT_MINOR=$(echo $VERSION_RAW | cut -d. -f2)
+            export OS_GIT_PATCH=$(echo $VERSION_RAW | cut -d. -f3)
+            export OS_GIT_TREE_STATE="dirty"
+            
+            echo "Build Metadata (Kubernetes):"
+            echo "  OS_GIT_VERSION: $OS_GIT_VERSION"
+          fi
+
+          # Install build dependencies if spec exists
+          if [ -n "${{ matrix.component.spec_file }}" ]; then
+            dnf builddep -y "${{ matrix.component.spec_file }}"
+          fi
+
+          if [ -n "${{ matrix.component.build_script }}" ]; then
+            echo "Using explicit build script: ${{ matrix.component.build_script }}"
+            chmod +x "${{ matrix.component.build_script }}"
+            ./${{ matrix.component.build_script }}
+          elif [ -d ".tito" ]; then
+            echo "Tito directory found, using tito..."
+            tito build --rpm --test
+          elif [ -f "Makefile" ] && make -n rpm >/dev/null 2>&1; then
+            echo "Makefile has rpm target, using make rpm..."
+            make rpm
+          elif [ -n "${{ matrix.component.spec_file }}" ]; then
+            echo "Falling back to manual rpmbuild with ${{ matrix.component.spec_file }}..."
+            SPEC="${{ matrix.component.spec_file }}"
+            NAME=$(rpmspec -q --qf "%{name}\n" "$SPEC" | head -n 1)
+            VERSION=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
+            mkdir -p _rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+            tar -czf "_rpmbuild/SOURCES/${NAME}-${VERSION}.tar.gz" --exclude='.git' --transform="s|^.|$NAME-$VERSION|" ./
+            rpmbuild -ba "$SPEC" --define "_topdir $PWD/_rpmbuild"
+          else
+            echo "No build script, tito, Makefile rpm target, or .spec file defined."
+            exit 1
+          fi
           
       - name: Archive RPM Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kubernetes-rpms-el${{ matrix.os_version }}
-          path: _output/local/releases/rpms/
+          name: ${{ matrix.component.name }}-rpms-el${{ matrix.os_version }}
+          path: |
+            _output/local/releases/rpms/
+            _output/releases/rpms/
+            RPMS/
+            _rpmbuild/RPMS/
+          if-no-files-found: warn
