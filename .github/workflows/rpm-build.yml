@@ -45,6 +45,8 @@ jobs:
     steps:
       - name: Install Git and Toolchain
         run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled crb
           dnf install -y \
             git \
             rpm-build \
@@ -57,10 +59,8 @@ jobs:
             krb5-devel \
             bsdtar \
             systemd \
-            tito \
             cargo \
-            findutils \
-            dnf-plugins-core
+            findutils
 
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -100,11 +100,10 @@ jobs:
 
           if [ -n "${{ matrix.component.build_script }}" ]; then
             echo "Using explicit build script: ${{ matrix.component.build_script }}"
+            # Note: build scripts like cri-o's often run dnf builddep internally.
+            # We ensure CRB is enabled for them.
             chmod +x "${{ matrix.component.build_script }}"
             ./${{ matrix.component.build_script }}
-          elif [ -d ".tito" ]; then
-            echo "Tito directory found, using tito..."
-            tito build --rpm --test
           elif [ -f "Makefile" ] && make -n rpm >/dev/null 2>&1; then
             echo "Makefile has rpm target, using make rpm..."
             make rpm
@@ -117,7 +116,7 @@ jobs:
             tar -czf "_rpmbuild/SOURCES/${NAME}-${VERSION}.tar.gz" --exclude='.git' --transform="s|^.|$NAME-$VERSION|" ./
             rpmbuild -ba "$SPEC" --define "_topdir $PWD/_rpmbuild"
           else
-            echo "No build script, tito, Makefile rpm target, or .spec file defined."
+            echo "No build script, Makefile rpm target, or .spec file defined."
             exit 1
           fi
           
