@@ -16,12 +16,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os_version: [9, 10]
+        os_version: [9]
         component:
           - name: kubernetes
             repository: openshift/kubernetes
             ref: master
             build_script: openshift-hack/build-rpms.sh
+            spec_file: openshift.spec
           - name: cri-o
             repository: cri-o/cri-o
             ref: main
@@ -45,7 +46,7 @@ jobs:
     steps:
       - name: Install Git and Toolchain
         run: |
-          dnf install -y dnf-plugins-core
+          dnf install -y dnf-plugins-core epel-release
           dnf config-manager --set-enabled crb
           dnf install -y \
             git \
@@ -60,7 +61,9 @@ jobs:
             bsdtar \
             systemd \
             cargo \
-            findutils
+            findutils \
+            rpkg \
+            goversioninfo
 
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -76,32 +79,43 @@ jobs:
           # Fix git ownership issue in container
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           
+          # Generic Metadata Extraction
+          # Try to get version from tags or commit, fall back to 0.0.1
+          COMMIT=$(git rev-parse --short HEAD)
+          VERSION_RAW=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.1")
+          
           if [ "${{ matrix.component.name }}" == "kubernetes" ]; then
-            # Special metadata handling for Kubernetes
-            VERSION_RAW=$(sed -rn 's/.*io.openshift.build.versions="kubernetes=(1.[0-9]+.[0-9]+(-rc.[0-9])?)"/\1/p' openshift-hack/images/hyperkube/Dockerfile.rhel)
-            COMMIT=$(git rev-parse --short HEAD)
-            VERSION="v${VERSION_RAW}"
-            
-            export OS_GIT_VERSION="${VERSION}+${COMMIT}"
-            export OS_GIT_COMMIT="${COMMIT}"
-            export OS_GIT_MAJOR=$(echo $VERSION_RAW | cut -d. -f1)
-            export OS_GIT_MINOR=$(echo $VERSION_RAW | cut -d. -f2)
-            export OS_GIT_PATCH=$(echo $VERSION_RAW | cut -d. -f3)
-            export OS_GIT_TREE_STATE="dirty"
-            
-            echo "Build Metadata (Kubernetes):"
-            echo "  OS_GIT_VERSION: $OS_GIT_VERSION"
+            # Override with Kubernetes specialized versioning if possible
+            VERSION_RAW=$(sed -rn 's/.*io.openshift.build.versions="kubernetes=(1.[0-9]+.[0-9]+(-rc.[0-9])?)"/\1/p' openshift-hack/images/hyperkube/Dockerfile.rhel || echo "$VERSION_RAW")
           fi
+          
+          VERSION="v${VERSION_RAW}"
+          export OS_GIT_VERSION="${VERSION}+${COMMIT}"
+          export OS_GIT_COMMIT="${COMMIT}"
+          export OS_GIT_MAJOR=$(echo $VERSION_RAW | cut -d. -f1)
+          export OS_GIT_MINOR=$(echo $VERSION_RAW | cut -d. -f2)
+          export OS_GIT_PATCH=$(echo $VERSION_RAW | cut -d. -f3)
+          export OS_GIT_TREE_STATE="dirty"
+          
+          echo "Build Metadata:"
+          echo "  OS_GIT_VERSION: $OS_GIT_VERSION"
+
+          # Install goversioninfo (missing in EL9 repos but needed by oc)
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          export PATH=$PATH:$(go env GOPATH)/bin
 
           # Install build dependencies if spec exists
           if [ -n "${{ matrix.component.spec_file }}" ]; then
-            dnf builddep -y "${{ matrix.component.spec_file }}"
+            SPEC="${{ matrix.component.spec_file }}"
+            # Hack for oc: remove goversioninfo dependency if not in repo
+            if [ "$SPEC" == "oc.spec" ]; then
+              sed -i '/BuildRequires:.*goversioninfo/d' "$SPEC"
+            fi
+            dnf builddep -y "$SPEC"
           fi
 
           if [ -n "${{ matrix.component.build_script }}" ]; then
             echo "Using explicit build script: ${{ matrix.component.build_script }}"
-            # Note: build scripts like cri-o's often run dnf builddep internally.
-            # We ensure CRB is enabled for them.
             chmod +x "${{ matrix.component.build_script }}"
             ./${{ matrix.component.build_script }}
           elif [ -f "Makefile" ] && make -n rpm >/dev/null 2>&1; then
@@ -111,10 +125,10 @@ jobs:
             echo "Falling back to manual rpmbuild with ${{ matrix.component.spec_file }}..."
             SPEC="${{ matrix.component.spec_file }}"
             NAME=$(rpmspec -q --qf "%{name}\n" "$SPEC" | head -n 1)
-            VERSION=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
+            VERSION_SPEC=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
             mkdir -p _rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-            tar -czf "_rpmbuild/SOURCES/${NAME}-${VERSION}.tar.gz" --exclude='.git' --transform="s|^.|$NAME-$VERSION|" ./
-            rpmbuild -ba "$SPEC" --define "_topdir $PWD/_rpmbuild"
+            tar -czf "_rpmbuild/SOURCES/${NAME}-${VERSION_SPEC}.tar.gz" --exclude='.git' --transform="s|^.|$NAME-$VERSION_SPEC|" ./
+            rpmbuild -ba "$SPEC" --define "_topdir $PWD/_rpmbuild" --define "version $VERSION_RAW" --define "release 1" --define "commit $COMMIT"
           else
             echo "No build script, Makefile rpm target, or .spec file defined."
             exit 1
