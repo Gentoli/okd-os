@@ -11,7 +11,7 @@ on:
       version:
         description: 'Version to build'
         required: false
-        default: '6.12.0-243.el10'
+        default: '6.12.0-250.el10'
       release_image:
         description: 'Release image to extract base images from'
         required: false
