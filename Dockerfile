@@ -11,7 +11,17 @@ RUN set -eux; \
     curl -fsSLo /tmp/kernel-modules-$VERSION.x86_64.rpm https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/kernel-modules-$VERSION.x86_64.rpm; \
     curl -fsSLo /tmp/kernel-modules-core-$VERSION.x86_64.rpm https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/kernel-modules-core-$VERSION.x86_64.rpm; \
     curl -fsSLo /tmp/kernel-modules-extra-$VERSION.x86_64.rpm https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/kernel-modules-extra-$VERSION.x86_64.rpm; \
-    rpm-ostree override replace /tmp/kernel*.rpm; \
-    rm -f /tmp/kernel*.rpm; \
+    rpm-ostree override replace \
+        /tmp/kernel-$VERSION.x86_64.rpm \
+        /tmp/kernel-core-$VERSION.x86_64.rpm \
+        /tmp/kernel-modules-$VERSION.x86_64.rpm \
+        /tmp/kernel-modules-core-$VERSION.x86_64.rpm \
+        /tmp/kernel-modules-extra-$VERSION.x86_64.rpm; \
+    rm -f \
+        /tmp/kernel-$VERSION.x86_64.rpm \
+        /tmp/kernel-core-$VERSION.x86_64.rpm \
+        /tmp/kernel-modules-$VERSION.x86_64.rpm \
+        /tmp/kernel-modules-core-$VERSION.x86_64.rpm \
+        /tmp/kernel-modules-extra-$VERSION.x86_64.rpm; \
     rpm-ostree cleanup -m; \
     ostree container commit
