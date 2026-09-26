@@ -18,7 +18,36 @@ concurrency:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    container:
+      image: quay.io/coreos-assembler/coreos-assembler:latest
+      options: >-
+        --user 0
+        --privileged
+        --device /dev/kvm
+        --device /dev/fuse
+        --tmpfs /tmp
+      volumes:
+        - /var/tmp:/var/tmp
     steps:
+      - name: Prepare COSA container
+        run: |
+          set -euo pipefail
+          if [[ ! -e /dev/kvm ]]; then
+            echo "::error::COSA requires /dev/kvm for this build."
+            exit 1
+          fi
+
+          dnf install -y nodejs
+
+          kvm_gid=$(stat -c '%g' /dev/kvm)
+          if kvm_group=$(getent group "$kvm_gid"); then
+            kvm_group=${kvm_group%%:*}
+          else
+            kvm_group="runner-kvm-${kvm_gid}"
+            groupadd --gid "$kvm_gid" "$kvm_group"
+          fi
+          usermod --append --groups "$kvm_group" builder
+
       - name: Checkout workflow repository
         uses: actions/checkout@v4
         with:
@@ -45,28 +74,14 @@ jobs:
       - name: Build c9s base image
         run: |
           set -euo pipefail
-          if [[ ! -e /dev/kvm ]]; then
-            echo "::error::COSA requires /dev/kvm for this build."
-            exit 1
-          fi
-
-          sudo mkdir -p "$GITHUB_WORKSPACE/os/base/c9s/build"
-          sudo chown 1000:1000 "$GITHUB_WORKSPACE/os/base/c9s/build"
-          kvm_gid=$(stat -c '%g' /dev/kvm)
-
-          docker run --rm --privileged \
-            --security-opt label=disable \
-            --device /dev/kvm \
-            --group-add "$kvm_gid" \
-            --device /dev/fuse \
-            --tmpfs /tmp \
-            --volume /var/tmp:/var/tmp \
-            --volume "$GITHUB_WORKSPACE:/work" \
-            --workdir /work/os/base/c9s/build \
-            --entrypoint /bin/bash \
-            quay.io/coreos-assembler/coreos-assembler:latest \
-            -euo pipefail -c '
-              coreos-assembler init --variant c9s /work/os/base/c9s/source
+          build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
+          mkdir -p "$build_dir"
+          chown builder:builder "$build_dir"
+          runuser -u builder -- env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            /bin/bash -euo pipefail -c '
+              cd "$GITHUB_WORKSPACE/os/base/c9s/build"
+              coreos-assembler init --variant c9s \
+                "$GITHUB_WORKSPACE/os/base/c9s/source"
               coreos-assembler build
             '
 
@@ -88,39 +103,27 @@ jobs:
           REGISTRY_AUTH_FILE: ${{ runner.temp }}/ghcr-auth.json
         run: |
           set -euo pipefail
+          cd "$GITHUB_WORKSPACE/os/base/c9s/build"
           image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/okd-os-scos-base"
           immutable_tag="c9s-${GITHUB_SHA:0:12}"
+          mapfile -t archives < <(
+            find builds -type f \
+              -path "*/x86_64/scos-*-ostree.x86_64.ociarchive" -print
+          )
+          if (( ${#archives[@]} != 1 )); then
+            echo "Expected one x86_64 SCOS OCI archive," \
+              "found ${#archives[@]}." >&2
+            exit 1
+          fi
 
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE/os/base/c9s/build:/work/build:ro" \
-            --volume "$REGISTRY_AUTH_FILE:/run/ghcr-auth.json:ro" \
-            --workdir /work/build \
-            --env REGISTRY_AUTH_FILE=/run/ghcr-auth.json \
-            --env IMAGE_REF="$image_ref" \
-            --env IMMUTABLE_TAG="$immutable_tag" \
-            --env GITHUB_REF="$GITHUB_REF" \
-            --entrypoint /bin/bash \
-            quay.io/coreos-assembler/coreos-assembler:latest \
-            -euo pipefail -c '
-              mapfile -t archives < <(
-                find builds -type f \
-                  -path "*/x86_64/scos-*-ostree.x86_64.ociarchive" -print
-              )
-              if (( ${#archives[@]} != 1 )); then
-                echo "Expected one x86_64 SCOS OCI archive," \
-                  "found ${#archives[@]}." >&2
-                exit 1
-              fi
-
-              skopeo copy --dest-authfile "$REGISTRY_AUTH_FILE" \
-                "oci-archive:${archives[0]}" \
-                "docker://${IMAGE_REF}:${IMMUTABLE_TAG}"
-              if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
-                skopeo copy --dest-authfile "$REGISTRY_AUTH_FILE" \
-                  "oci-archive:${archives[0]}" \
-                  "docker://${IMAGE_REF}:c9s"
-              fi
-            '
+          skopeo copy --dest-authfile "$REGISTRY_AUTH_FILE" \
+            "oci-archive:${archives[0]}" \
+            "docker://${image_ref}:${immutable_tag}"
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            skopeo copy --dest-authfile "$REGISTRY_AUTH_FILE" \
+              "oci-archive:${archives[0]}" \
+              "docker://${image_ref}:c9s"
+          fi
 
       - name: Remove registry auth file
         if: always()
