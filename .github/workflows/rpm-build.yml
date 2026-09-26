@@ -279,3 +279,36 @@ jobs:
           name: ${{ matrix.component.name }}-rpms-centos-sig-el9
           path: rpmbuild/RPMS/**/*.rpm
           if-no-files-found: error
+
+  test-rpm-install:
+    name: Test installing all RPMs (EL9)
+    runs-on: ubuntu-latest
+    needs:
+      - build-rpms
+      - build-rpms-centos-sig
+    steps:
+      - name: Download all EL9 RPM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-rpms-*el9"
+          path: rpms
+          merge-multiple: true
+
+      - name: Install all RPMs in CentOS Stream 9
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE/rpms:/rpms:ro" \
+            quay.io/centos/centos:stream9 \
+            bash -euo pipefail -c '
+              dnf install -y dnf-plugins-core epel-release epel-next-release
+              dnf config-manager --set-enabled crb
+              dnf makecache
+              mapfile -d "" rpms < <(find /rpms -type f -name "*.rpm" -print0)
+              if [ "${#rpms[@]}" -eq 0 ]; then
+                echo "No RPM artifacts were downloaded." >&2
+                exit 1
+              fi
+              printf "Installing %d RPMs\n" "${#rpms[@]}"
+              dnf install -y "${rpms[@]}"
+            '
