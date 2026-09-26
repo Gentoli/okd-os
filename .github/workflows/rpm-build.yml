@@ -62,8 +62,7 @@ jobs:
             bsdtar \
             systemd \
             cargo \
-            findutils \
-            rpkg
+            findutils
 
       - name: Checkout Repository
         uses: actions/checkout@v4
