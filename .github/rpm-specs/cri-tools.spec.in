@@ -1,3 +1,6 @@
+%global debug_package %{nil}
+%undefine _missing_build_ids_terminate_build
+
 Name: cri-tools
 Version: @VERSION@
 Release: 1%{?dist}
