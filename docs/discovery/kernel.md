@@ -1,36 +1,37 @@
-# Kernel build discovery
+# How OpenShift CI builds RPMs
 
-## RPM build workflow failure
+This documents the RPM-producing paths found in OpenShift's [`openshift/release` ci-operator configuration](https://github.com/openshift/release/tree/master/ci-operator/config) for the six components in this repository's [RPM build matrix](../../.github/workflows/rpm-build.yml). An upstream RPM spec or Makefile target alone does not mean OpenShift CI builds that component as an RPM: the ci-operator configuration must connect a job to RPM build commands and artifacts.
 
-Run [36077081440](https://github.com/Gentoli/okd-os/actions/runs/36077081440) failed in the `Install Git and Toolchain` step for all six matrix jobs, before checkout or any RPM build started. CentOS Stream 9 DNF reported:
+## Components with OpenShift CI RPM builds
 
-```text
-No match for argument: rpkg
-Error: Unable to find a match: rpkg
-```
+### Kubernetes (`openshift`)
 
-The workflow installed `rpkg` alongside the RPM build tools, but it is not available from the enabled CentOS Stream 9 and EPEL repositories. Removing it lets the package installation proceed.
+The [Kubernetes CI configuration](https://github.com/openshift/release/blob/master/ci-operator/config/openshift/kubernetes/openshift-kubernetes-master.yaml) sets `rpm_build_commands: openshift-hack/build-rpms.sh`. That [build script](https://github.com/openshift/kubernetes/blob/master/openshift-hack/build-rpms.sh) finds the spec in the checkout and runs `rpmbuild` with the OpenShift build metadata. The upstream [`openshift.spec`](https://github.com/openshift/kubernetes/blob/master/openshift.spec) uses the project Makefile to build and package kube-apiserver, kube-controller-manager, kube-scheduler, kubelet, and hyperkube. The script documents RPM output under `_output/releases` and creates repository metadata for the generated RPMs.
 
-I reproduced the failure in a CentOS Stream 9 container with the workflow's commands:
+### CRI-O (`cri-o`)
 
-```sh
-dnf install -y dnf-plugins-core epel-release epel-next-release
-dnf config-manager --set-enabled crb
-dnf makecache
-dnf install -y git rpm-build rsync createrepo gcc gcc-c++ make golang krb5-devel bsdtar systemd cargo findutils rpkg
-```
+The [CRI-O CI configuration](https://github.com/openshift/release/blob/master/ci-operator/config/cri-o/cri-o/cri-o-cri-o-main.yaml) sets `rpm_build_commands: hack/build-rpms.sh`. The [script](https://github.com/cri-o/cri-o/blob/main/hack/build-rpms.sh) selects the spec under `contrib/test/ci`, resolves its build dependencies, and runs `rpmbuild`. The [spec](https://github.com/cri-o/cri-o/blob/main/contrib/test/ci/cri-o.spec) explicitly says it is for CI testing, not a distro package. The CI config then downloads the newly built `cri-o` RPM from its `built` repository and installs it into RHCOS test images.
 
-The last command fails because `rpkg` cannot be resolved. The same install command without `rpkg` is the corrected workflow command.
+### oc (`oc`)
 
-Upstream [`openshift/kubernetes`'s `openshift-hack/build-rpms.sh`](https://github.com/openshift/kubernetes/blob/master/openshift-hack/build-rpms.sh) checks for `rpmbuild` and `createrepo`; it does not require `rpkg`. The script explains that its RPM build runs through the upstream Makefile invoked by the spec file.
+The [oc CI configuration](https://github.com/openshift/release/blob/master/ci-operator/config/openshift/oc/openshift-oc-main.yaml) defines `rpm_build_commands` inline. It stages a source tarball and upstream [`oc.spec`](https://github.com/openshift/oc/blob/main/oc.spec) in `_rpmbuild`, runs `rpmbuild -ba`, and sets `rpm_build_location` to `_rpmbuild/RPMS/`. Promotion maps the resulting `rpms` image to `oc-rpms`. OpenShift's [oc RPM flow notes](https://github.com/openshift/release/blob/master/ci-operator/config/openshift/oc/README.md) explain that the Origin build merges `oc-rpms` with its own RPM artifacts into the `artifacts` image; see also the [Origin CI configuration](https://github.com/openshift/release/blob/master/ci-operator/config/openshift/origin/openshift-origin-main.yaml).
 
-## Remaining component failures
+## Components without a configured OpenShift CI RPM path
 
-Run [36220445413](https://github.com/Gentoli/okd-os/actions/runs/36220445413) confirmed the Kubernetes RPM built, but five other matrix jobs failed:
+The current `openshift/release` ci-operator configs do not show a component RPM build for these three matrix jobs. Their RPMs in this repository's GitHub Actions workflow are reproductions, not outputs of an identified OpenShift CI RPM job.
 
-- CRI-O received an empty `OS_GIT_VERSION`: a shallow checkout has no tags, and the previous `git describe | sed || echo` pipeline succeeded with empty output. The workflow now falls back to a valid version and reads CRI-O's version from `internal/version/version.go`.
-- `cri-tools` has a `make binaries` target but no RPM target or spec in its upstream repository. Its current `go.mod` requires Go 1.27, while the EL9 Go package defaults to `GOTOOLCHAIN=local`; the workflow now enables automatic Go toolchain selection. `conmon-rs`'s [upstream `make rpm` target](https://github.com/containers/conmon-rs/blob/main/Makefile) invokes `rpkg local`. The EL9 `python3-rpkg` package contains the Python library but does not install the `rpkg` executable. Local RPM spec templates now build both upstream projects with `rpmbuild`; the conmon version comes from its Cargo manifest.
-- The `oc` and CRI-O credential-provider fallback commands created the source archive under `_rpmbuild` while archiving the whole checkout. Tar then read the archive while it was being written. Excluding `_rpmbuild` and `_output` prevents generated files from entering their source archives. Manual spec builds now use the spec's own version so the source archive and spec stay aligned.
-- The subsequent run showed two further manual-spec issues: the `oc` spec's `os_git_vars` macro defaulted to empty, leaving `hack/generate-versioninfo.sh` without its required semantic version; and the credential-provider spec declares `Source0: %{name}.tar.gz`, not a versioned tarball. The workflow now passes its exported build metadata into `os_git_vars` and names the generated source archive from the spec's resolved `Source0`.
+### cri-tools
 
-The workflow's CentOS Stream 9 and EPEL repositories provide the conmon build requirements (`capnproto` and `protobuf-compiler`) through `dnf builddep` on its spec.
+No `rpm_build_commands` config or upstream RPM spec was found for `kubernetes-sigs/cri-tools`. Its upstream project supplies a `make binaries` build; this repository's [local spec template](../../.github/rpm-specs/cri-tools.spec.in) packages the resulting `crictl` and `critest` binaries with `rpmbuild`.
+
+### conmon-rs
+
+No component RPM build config was found for `containers/conmon-rs` in `openshift/release`. Its upstream [`make rpm` target](https://github.com/containers/conmon-rs/blob/main/Makefile) invokes `rpkg local`; that is not the `rpmbuild` path used by the OpenShift Kubernetes and CRI-O CI scripts. This repository instead uses its [local spec template](../../.github/rpm-specs/conmon-rs.spec.in) to package the upstream release build with `rpmbuild`.
+
+### CRI-O credential provider
+
+The upstream [repository includes `crio-credential-provider.spec`](https://github.com/openshift/crio-credential-provider/blob/main/crio-credential-provider.spec), which describes building and installing the Go binary. However, no corresponding RPM build entry was found in the current OpenShift ci-operator configuration. The GitHub Actions matrix builds this upstream spec directly.
+
+## How this relates to this repository's workflow
+
+The [local workflow](../../.github/workflows/rpm-build.yml) checks out each upstream source and either runs its OpenShift-style build script, builds an upstream spec, or uses a local spec template when no usable upstream RPM recipe exists. It reproduces package creation on CentOS Stream 9; it does not reproduce ci-operator image promotion or Origin's artifact aggregation. OpenShift's Kubernetes and CRI-O RPM scripts use `rpmbuild` and `createrepo`, not `rpkg`; the conmon-rs Makefile's separate `rpkg local` target is why its local reproduction uses a spec template instead.
