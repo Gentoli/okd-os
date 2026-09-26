@@ -238,13 +238,19 @@ jobs:
           topdir="$GITHUB_WORKSPACE/rpmbuild"
           mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
           while IFS= read -r filename; do
-            if [ ! -f "$filename" ]; then
+            source_file="$filename"
+            if [ ! -f "$source_file" ] && [ -f "SOURCES/$filename" ]; then
+              source_file="SOURCES/$filename"
+            fi
+            if [ ! -f "$source_file" ]; then
               echo "Missing lookaside source: $filename"
               exit 1
             fi
-            cp "$filename" "$topdir/SOURCES/"
+            cp "$source_file" "$topdir/SOURCES/"
           done < <(sed -nE 's/^[^ ]+ \(([^)]+)\) = .*/\1/p' sources)
-          cp -a SOURCES/. "$topdir/SOURCES/" 2>/dev/null || true
+          if [ -d SOURCES ]; then
+            cp -a SOURCES/. "$topdir/SOURCES/"
+          fi
           dnf builddep -y "$spec"
           rpmbuild -ba "$spec" \
             --define "_topdir $topdir" \
