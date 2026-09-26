@@ -283,6 +283,8 @@ jobs:
   test-rpm-install:
     name: Test installing all RPMs (EL9)
     runs-on: ubuntu-latest
+    container:
+      image: quay.io/centos/centos:stream9
     needs:
       - build-rpms
       - build-rpms-centos-sig
@@ -300,98 +302,103 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/rpm-test-report"
           printf "RPM and binary version report\n" \
             > "$GITHUB_WORKSPACE/rpm-test-report/rpm-versions.txt"
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE/rpms:/rpms:ro" \
-            --volume "$GITHUB_WORKSPACE/rpm-test-report:/report" \
-            quay.io/centos/centos:stream9 \
-            bash -euo pipefail -c '
-              dnf install -y dnf-plugins-core epel-release epel-next-release
-              dnf config-manager --set-enabled crb
-              dnf makecache
-              mapfile -d "" rpms < <(find /rpms -type f -name "*.rpm" -print0)
-              if [ "${#rpms[@]}" -eq 0 ]; then
-                echo "No RPM artifacts were downloaded." >&2
-                exit 1
-              fi
-              printf "Installing %d RPMs\n" "${#rpms[@]}"
-              dnf install -y "${rpms[@]}"
+          dnf install -y dnf-plugins-core epel-release epel-next-release
+          dnf config-manager --set-enabled crb
+          dnf makecache
+          python3 - <<'PY'
+          import os
+          import shlex
+          import stat
+          import subprocess
+          from pathlib import Path
 
-              report=/report/rpm-versions.txt
-              {
-                echo
-                echo "Installed RPM versions:"
-                for rpm_file in "${rpms[@]}"; do
-                  rpm -qp --qf "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n" "$rpm_file"
-                done | sort
-                echo
-                echo "Executable binaries:"
-              } >> "$report"
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          report_path = workspace / "rpm-test-report" / "rpm-versions.txt"
+          rpm_files = sorted((workspace / "rpms").rglob("*.rpm"))
+          if not rpm_files:
+              raise SystemExit("No RPM artifacts were downloaded.")
 
-              declare -A seen_bins=()
-              bin_count=0
-              for rpm_file in "${rpms[@]}"; do
-                while read -r mode bin; do
-                  case "$bin" in
-                    /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*|/usr/libexec/*)
-                      if (( mode & 73 )) &&
-                        { [ -f "$bin" ] || [ -L "$bin" ]; }; then
-                        if [ ! -f "$bin" ] || [ ! -x "$bin" ]; then
-                          echo "RPM binary is missing or not executable: $bin" >&2
-                          exit 1
-                        fi
-                        if [ -z "${seen_bins[$bin]+x}" ]; then
-                          seen_bins["$bin"]=1
-                          bin_count=$((bin_count + 1))
-                          owner=$(rpm -qf --qf \
-                            "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}" "$bin")
-                          version_args=()
-                          case "$bin" in
-                            /usr/bin/conmonrs|/usr/bin/crictl|/usr/bin/crio|\
-                              /usr/bin/kube-apiserver|/usr/bin/kube-controller-manager|\
-                              /usr/bin/kube-scheduler|/usr/bin/kubelet|\
-                              /usr/bin/kubensenter|\
-                              /usr/libexec/kubelet-image-credential-provider-plugins/crio-credential-provider)
-                              version_args=("$bin" --version)
-                              ;;
-                            /usr/bin/oc|/usr/bin/kubectl)
-                              version_args=("$bin" version --client)
-                              ;;
-                            /usr/bin/hyperkube)
-                              version_args=("$bin" kubelet --version)
-                              ;;
-                          esac
-                          if [ "${#version_args[@]}" -eq 0 ]; then
-                            printf "%s (%s): no version probe; RPM version recorded\n" \
-                              "$bin" "$owner" >> "$report"
-                          elif output=$(timeout 20s "${version_args[@]}" 2>&1); then
-                            version=$(
-                              printf "%s\n" "$output" |
-                                grep -Em1 \
-                                  "^(version:|[^[:space:]]+ version [0-9]|Kubernetes v|Client Version:|Version:[[:space:]]|nsenter from )" ||
-                                true
-                            )
-                            if [ -z "$version" ]; then
-                              version=$(printf "%s\n" "$output" | head -n 1)
-                            fi
-                            printf "%s (%s): %s\n" "$bin" "$owner" "$version" \
-                              >> "$report"
-                          else
-                            status=$?
-                            printf "%s (%s): version probe failed (%d); RPM version recorded\n" \
-                              "$bin" "$owner" "$status" >> "$report"
-                          fi
-                        fi
-                      fi
-                      ;;
-                  esac
-                done < <(rpm -qp --qf "[%{FILEMODES} %{FILENAMES}\n]" "$rpm_file")
-              done
-              if [ "$bin_count" -eq 0 ]; then
-                echo "No executable binaries were found in the RPMs." >&2
-                exit 1
-              fi
-              cat "$report"
-            '
+          def rpm_query(rpm_file, query):
+              result = subprocess.run(
+                  ["rpm", "-qp", "--qf", query, str(rpm_file)],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              )
+              return result.stdout
+
+          report = ["RPM and binary version report", "", "Installed RPMs:"]
+          binaries = {}
+          for rpm_file in rpm_files:
+              package = rpm_query(
+                  rpm_file, "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}"
+              ).strip()
+              report.append(f"  {package}")
+              file_entries = rpm_query(
+                  rpm_file, "[%{FILEMODES}\t%{FILENAMES}\n]"
+              )
+              for entry in file_entries.splitlines():
+                  mode, path = entry.split("\t", 1)
+                  if stat.S_ISREG(int(mode)) and int(mode) & 0o111:
+                      binaries.setdefault(path, set()).add(package)
+
+          install = subprocess.run(
+              ["dnf", "install", "-y", *(str(path) for path in rpm_files)]
+          )
+          if install.returncode:
+              report_path.write_text("\n".join(report) + "\n")
+              raise SystemExit(install.returncode)
+
+          version_args = {
+              "/usr/bin/oc": ["version", "--client"],
+              "/usr/bin/kubectl": ["version", "--client"],
+              "/usr/bin/hyperkube": ["kubelet", "--version"],
+          }
+          failures = []
+          report.extend(["", "Executable binaries and full version output:"])
+          for binary, owners in sorted(binaries.items()):
+              path = Path(binary)
+              owners_text = ", ".join(sorted(owners))
+              if not path.is_file() or not os.access(path, os.X_OK):
+                  failures.append(binary)
+                  report.extend(
+                      ["", f"$ {binary} (from {owners_text})", "NOT FOUND OR NOT EXECUTABLE"]
+                  )
+                  continue
+
+              args = [binary, *version_args.get(binary, ["--version"])]
+              report.extend(
+                  ["", f"$ {shlex.join(args)} (from {owners_text})"]
+              )
+              try:
+                  result = subprocess.run(
+                      args,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.STDOUT,
+                      text=True,
+                      errors="replace",
+                      timeout=30,
+                      check=False,
+                  )
+                  report.append(f"exit status: {result.returncode}")
+                  report.extend((result.stdout or "").rstrip().splitlines())
+              except subprocess.TimeoutExpired as error:
+                  report.append("timed out after 30 seconds")
+                  output = error.stdout or ""
+                  if isinstance(output, bytes):
+                      output = output.decode(errors="replace")
+                  report.extend(output.rstrip().splitlines())
+
+          report_path.write_text("\n".join(report) + "\n")
+          print(report_path.read_text())
+          if not binaries:
+              raise SystemExit("No executable files were found in the RPMs.")
+          if failures:
+              raise SystemExit(
+                  "RPM binaries are missing or not executable: "
+                  + ", ".join(failures)
+              )
+          PY
 
       - name: Archive RPM version report
         if: always()
