@@ -179,7 +179,7 @@ jobs:
             source/_output/releases/rpms/
             source/RPMS/
             source/_rpmbuild/RPMS/
-          if-no-files-found: warn
+          if-no-files-found: error
 
   build-rpms-centos-sig:
     name: Build ${{ matrix.component.name }} from CentOS SIG source (EL9)
@@ -278,4 +278,152 @@ jobs:
         with:
           name: ${{ matrix.component.name }}-rpms-centos-sig-el9
           path: rpmbuild/RPMS/**/*.rpm
+          if-no-files-found: error
+
+  test-rpm-install:
+    name: Test installing all RPMs (EL9)
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/centos/centos:stream9
+    needs:
+      - build-rpms
+      - build-rpms-centos-sig
+    steps:
+      - name: Download all EL9 RPM artifacts
+        uses: actions/download-artifact@v4.1.3
+        with:
+          pattern: "*-rpms-*el9"
+          path: rpms
+          merge-multiple: true
+
+      - name: Install all RPMs in CentOS Stream 9
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/rpm-test-report"
+          printf "RPM and binary version report\n" > \
+            "$GITHUB_WORKSPACE/rpm-test-report/rpm-versions.txt"
+          dnf install -y dnf-plugins-core epel-release epel-next-release
+          dnf config-manager --set-enabled crb
+          dnf makecache
+          mapfile -d "" rpms < <(
+            find "$GITHUB_WORKSPACE/rpms" -type f -name "*.rpm" -print0
+          )
+          if [ "${#rpms[@]}" -eq 0 ]; then
+            echo "No RPM artifacts were downloaded." >&2
+            exit 1
+          fi
+          dnf install -y "${rpms[@]}"
+        shell: bash
+
+      - name: Check binaries and record full version output
+        run: |
+          import os
+          import shlex
+          import stat
+          import subprocess
+          from pathlib import Path
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          report_path = workspace / "rpm-test-report" / "rpm-versions.txt"
+          rpm_files = sorted((workspace / "rpms").rglob("*.rpm"))
+          binary_dirs = (
+              "/bin/",
+              "/sbin/",
+              "/usr/bin/",
+              "/usr/sbin/",
+              "/usr/libexec/",
+          )
+
+          def rpm_query(rpm_file, query):
+              result = subprocess.run(
+                  ["rpm", "-qp", "--qf", query, str(rpm_file)],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              )
+              return result.stdout
+
+          report = ["RPM and binary version report", "", "Installed RPMs:"]
+          binaries = {}
+          for rpm_file in rpm_files:
+              package = rpm_query(
+                  rpm_file, "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}"
+              ).strip()
+              report.append(f"  {package}")
+              file_entries = rpm_query(
+                  rpm_file, "[%{FILEMODES}\t%{FILENAMES}\n]"
+              )
+              for entry in file_entries.splitlines():
+                  mode, path = entry.split("\t", 1)
+                  if (
+                      path.startswith(binary_dirs)
+                      and (
+                          stat.S_ISREG(int(mode))
+                          or stat.S_ISLNK(int(mode))
+                      )
+                      and int(mode) & 0o111
+                  ):
+                      binaries.setdefault(path, set()).add(package)
+
+          version_args = {
+              "/usr/bin/oc": ["version", "--client"],
+              "/usr/bin/kubectl": ["version", "--client"],
+              "/usr/bin/hyperkube": ["kubelet", "--version"],
+          }
+          failures = []
+          report.extend(["", "Executable binaries and full version output:"])
+          for binary, owners in sorted(binaries.items()):
+              path = Path(binary)
+              owners_text = ", ".join(sorted(owners))
+              if not path.is_file() or not os.access(path, os.X_OK):
+                  failures.append(binary)
+                  report.extend(
+                      [
+                          "",
+                          f"$ {binary} (from {owners_text})",
+                          "NOT FOUND OR NOT EXECUTABLE",
+                      ]
+                  )
+                  continue
+
+              args = [binary, *version_args.get(binary, ["--version"])]
+              report.extend(["", f"$ {shlex.join(args)} (from {owners_text})"])
+              try:
+                  result = subprocess.run(
+                      args,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.STDOUT,
+                      text=True,
+                      errors="replace",
+                      timeout=30,
+                      check=False,
+                  )
+                  report.append(f"exit status: {result.returncode}")
+                  report.extend((result.stdout or "").rstrip().splitlines())
+              except subprocess.TimeoutExpired as error:
+                  report.append("timed out after 30 seconds")
+                  output = error.stdout or ""
+                  if isinstance(output, bytes):
+                      output = output.decode(errors="replace")
+                  report.extend(output.rstrip().splitlines())
+              except OSError as error:
+                  report.append(f"could not run version probe: {error}")
+
+          report_path.write_text("\n".join(report) + "\n")
+          print(report_path.read_text())
+          if not binaries:
+              raise SystemExit("No executable files were found in the RPMs.")
+          if failures:
+              raise SystemExit(
+                  "RPM binaries are missing or not executable: "
+                  + ", ".join(failures)
+              )
+        shell: python3 {0}
+
+      - name: Archive RPM version report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-binary-versions-el9
+          path: rpm-test-report/rpm-versions.txt
           if-no-files-found: error
