@@ -333,7 +333,8 @@ jobs:
                 while read -r mode bin; do
                   case "$bin" in
                     /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*|/usr/libexec/*)
-                      if (( mode & 73 )); then
+                      if (( mode & 73 )) &&
+                        { [ -f "$bin" ] || [ -L "$bin" ]; }; then
                         if [ ! -f "$bin" ] || [ ! -x "$bin" ]; then
                           echo "RPM binary is missing or not executable: $bin" >&2
                           exit 1
