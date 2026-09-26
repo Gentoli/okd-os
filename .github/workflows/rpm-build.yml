@@ -147,8 +147,14 @@ jobs:
             echo "Building RPM from $SPEC..."
             NAME=$(rpmspec -q --qf "%{name}\n" "$SPEC" | head -n 1)
             VERSION_SPEC=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
+            SOURCE0=$(rpmspec -P "$SPEC" | sed -n 's/^Source0:[[:space:]]*//p' | head -n 1)
+            SOURCE_FILE="${SOURCE0##*/}"
+            if [ -z "$SOURCE_FILE" ] || [ "$SOURCE_FILE" == "(none)" ]; then
+              echo "Unable to determine source archive name from $SPEC."
+              exit 1
+            fi
             mkdir -p _rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-            tar -czf "_rpmbuild/SOURCES/${NAME}-${VERSION_SPEC}.tar.gz" \
+            tar -czf "_rpmbuild/SOURCES/${SOURCE_FILE}" \
               --exclude='./.git' \
               --exclude='./_output' \
               --exclude='./_rpmbuild' \
@@ -156,7 +162,8 @@ jobs:
             rpmbuild -ba "$SPEC" \
               --define "_topdir $PWD/_rpmbuild" \
               --define "release 1" \
-              --define "commit $COMMIT"
+              --define "commit $COMMIT" \
+              --define "os_git_vars OS_GIT_VERSION='$OS_GIT_VERSION' OS_GIT_COMMIT='$OS_GIT_COMMIT' OS_GIT_MAJOR='$OS_GIT_MAJOR' OS_GIT_MINOR='$OS_GIT_MINOR' OS_GIT_TREE_STATE='$OS_GIT_TREE_STATE'"
           elif [ -f "Makefile" ] && make -n rpm >/dev/null 2>&1; then
             echo "Makefile has rpm target, using make rpm..."
             make rpm
