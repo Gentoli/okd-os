@@ -9,6 +9,9 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-rpms:
     name: Build ${{ matrix.component.name }} (EL${{ matrix.os_version }})
@@ -21,22 +24,11 @@ jobs:
           - name: kubernetes
             repository: openshift/kubernetes
             ref: master
-            build_script: openshift-hack/build-rpms.sh
             spec_file: openshift.spec
-          - name: cri-o
-            repository: cri-o/cri-o
-            ref: main
-            build_script: hack/build-rpms.sh
-          - name: cri-tools
-            repository: kubernetes-sigs/cri-tools
-            ref: master
           - name: oc
             repository: openshift/oc
             ref: main
             spec_file: oc.spec
-          - name: conmon-rs
-            repository: containers/conmon-rs
-            ref: main
           - name: crio-credential-provider
             repository: openshift/crio-credential-provider
             ref: main
@@ -62,8 +54,10 @@ jobs:
             bsdtar \
             systemd \
             cargo \
-            findutils \
-            rpkg
+            findutils
+
+      - name: Checkout Workflow Repository
+        uses: actions/checkout@v4
 
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -71,24 +65,44 @@ jobs:
           repository: ${{ matrix.component.repository }}
           ref: ${{ matrix.component.ref }}
           fetch-depth: 1
+          path: source
 
       - name: Build RPMs
         run: |
-          echo "Starting build for ${{ matrix.component.name }} on CentOS Stream ${{ matrix.os_version }}..."
-          
+          cd "$GITHUB_WORKSPACE/source"
+          echo "Building ${{ matrix.component.name }} on CentOS Stream"
+          echo "  version ${{ matrix.os_version }}"
+
           # Fix git ownership issue in container
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/source"
+
           # Generic Metadata Extraction
-          # Try to get version from tags or commit, fall back to 0.0.1
+          # Shallow checkouts may not contain tags, so use a valid fallback.
           COMMIT=$(git rev-parse --short HEAD)
-          VERSION_RAW=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.1")
-          
+          VERSION_RAW=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          VERSION_RAW="${VERSION_RAW#v}"
+
           if [ "${{ matrix.component.name }}" == "kubernetes" ]; then
             # Override with Kubernetes specialized versioning if possible
-            VERSION_RAW=$(sed -rn 's/.*io.openshift.build.versions="kubernetes=(1.[0-9]+.[0-9]+(-rc.[0-9])?)"/\1/p' openshift-hack/images/hyperkube/Dockerfile.rhel || echo "$VERSION_RAW")
+            KUBERNETES_VERSION=$(
+              grep -oE \
+                'kubernetes=1\.[0-9]+\.[0-9]+(-rc\.[0-9])?' \
+                openshift-hack/images/hyperkube/Dockerfile.rhel |
+                head -n 1 | cut -d= -f2
+            )
+            VERSION_RAW="${KUBERNETES_VERSION:-$VERSION_RAW}"
           fi
-          
+
+          if [ -z "$VERSION_RAW" ]; then
+            VERSION_RAW="0.0.1"
+          fi
+
+          SPEC="${{ matrix.component.spec_file }}"
+          if [ -z "$SPEC" ] || [ ! -f "$SPEC" ]; then
+            echo "A valid RPM spec_file is required for this build job."
+            exit 1
+          fi
+
           VERSION="v${VERSION_RAW}"
           export OS_GIT_VERSION="${VERSION}+${COMMIT}"
           export OS_GIT_COMMIT="${COMMIT}"
@@ -96,51 +110,172 @@ jobs:
           export OS_GIT_MINOR=$(echo $VERSION_RAW | cut -d. -f2)
           export OS_GIT_PATCH=$(echo $VERSION_RAW | cut -d. -f3)
           export OS_GIT_TREE_STATE="dirty"
-          
+
           echo "Build Metadata:"
           echo "  OS_GIT_VERSION: $OS_GIT_VERSION"
 
+          export GOTOOLCHAIN=auto
+
           # Install goversioninfo (missing in EL9 repos but needed by oc)
-          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          go install \
+            github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
           export PATH=$PATH:$(go env GOPATH)/bin
 
-          # Install build dependencies if spec exists
-          if [ -n "${{ matrix.component.spec_file }}" ]; then
-            SPEC="${{ matrix.component.spec_file }}"
-            # Hack for oc: remove goversioninfo dependency if not in repo
-            if [ "$SPEC" == "oc.spec" ]; then
-              sed -i '/BuildRequires:.*goversioninfo/d' "$SPEC"
-            fi
-            dnf builddep -y "$SPEC"
+          # Install spec build dependencies
+          # Hack for oc: remove goversioninfo dependency if not in repo
+          if [ "$SPEC" == "oc.spec" ]; then
+            sed -i '/BuildRequires:.*goversioninfo/d' "$SPEC"
           fi
+          dnf builddep -y "$SPEC"
 
-          if [ -n "${{ matrix.component.build_script }}" ]; then
-            echo "Using explicit build script: ${{ matrix.component.build_script }}"
-            chmod +x "${{ matrix.component.build_script }}"
-            ./${{ matrix.component.build_script }}
-          elif [ -f "Makefile" ] && make -n rpm >/dev/null 2>&1; then
-            echo "Makefile has rpm target, using make rpm..."
-            make rpm
-          elif [ -n "${{ matrix.component.spec_file }}" ]; then
-            echo "Falling back to manual rpmbuild with ${{ matrix.component.spec_file }}..."
-            SPEC="${{ matrix.component.spec_file }}"
-            NAME=$(rpmspec -q --qf "%{name}\n" "$SPEC" | head -n 1)
-            VERSION_SPEC=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
-            mkdir -p _rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-            tar -czf "_rpmbuild/SOURCES/${NAME}-${VERSION_SPEC}.tar.gz" --exclude='.git' --transform="s|^.|$NAME-$VERSION_SPEC|" ./
-            rpmbuild -ba "$SPEC" --define "_topdir $PWD/_rpmbuild" --define "version $VERSION_RAW" --define "release 1" --define "commit $COMMIT"
-          else
-            echo "No build script, Makefile rpm target, or .spec file defined."
+          echo "Building RPM from $SPEC..."
+          VERSION_SPEC=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
+          if [ "${{ matrix.component.name }}" == "kubernetes" ]; then
+            VERSION_SPEC="$VERSION_RAW"
+          fi
+          NAME=$(
+            rpmspec --define "version $VERSION_SPEC" \
+              -q --qf "%{name}\n" "$SPEC" | head -n 1
+          )
+          VERSION_SPEC=$(
+            rpmspec --define "version $VERSION_SPEC" \
+              -q --qf "%{version}\n" "$SPEC" | head -n 1
+          )
+          echo "Building RPM ${NAME}-${VERSION_SPEC}"
+          SOURCE0=$(
+            rpmspec --define "version $VERSION_SPEC" -P "$SPEC" |
+              sed -n 's/^Source0:[[:space:]]*//p' |
+              head -n 1
+          )
+          SOURCE_FILE="${SOURCE0##*/}"
+          if [ -z "$SOURCE_FILE" ] || [ "$SOURCE_FILE" == "(none)" ]; then
+            echo "Unable to determine source archive name from $SPEC."
             exit 1
           fi
-          
+          mkdir -p _rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          tar -czf "_rpmbuild/SOURCES/${SOURCE_FILE}" \
+            --exclude='./.git' \
+            --exclude='./_output' \
+            --exclude='./_rpmbuild' \
+            --transform="s|^|$NAME-$VERSION_SPEC/|rSH" ./
+          rpmbuild -ba "$SPEC" \
+            --define "_topdir $PWD/_rpmbuild" \
+            --define "version $VERSION_SPEC" \
+            --define "release 1" \
+            --define "commit $COMMIT" \
+            --define "os_git_vars \
+              OS_GIT_VERSION='$OS_GIT_VERSION' \
+              OS_GIT_COMMIT='$OS_GIT_COMMIT' \
+              OS_GIT_MAJOR='$OS_GIT_MAJOR' \
+              OS_GIT_MINOR='$OS_GIT_MINOR' \
+              OS_GIT_TREE_STATE='$OS_GIT_TREE_STATE'"
+
       - name: Archive RPM Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.component.name }}-rpms-el${{ matrix.os_version }}
           path: |
-            _output/local/releases/rpms/
-            _output/releases/rpms/
-            RPMS/
-            _rpmbuild/RPMS/
+            source/_output/local/releases/rpms/
+            source/_output/releases/rpms/
+            source/RPMS/
+            source/_rpmbuild/RPMS/
           if-no-files-found: warn
+
+  build-rpms-centos-sig:
+    name: Build ${{ matrix.component.name }} from CentOS SIG source (EL9)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    container:
+      image: quay.io/centos/centos:stream9
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component:
+              name: cri-o
+              project: cri-o
+              ref: c9s-sig-cloud-okd-4.20
+          - component:
+              name: cri-tools
+              project: cri-tools
+              ref: c9s-sig-cloud-okd-4.20
+          - component:
+              name: conmon-rs
+              project: conmon-rs
+              ref: c9s-sig-cloud
+    steps:
+      - name: Install local RPM build tools
+        run: |
+          dnf install -y epel-release
+          dnf install -y epel-next-release dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf makecache
+          dnf install -y \
+            centpkg-sig \
+            gcc \
+            gcc-c++ \
+            git \
+            go-rpm-macros \
+            golang \
+            make \
+            rpm-build
+
+      - name: Checkout CentOS SIG package source
+        env:
+          SIG_PROJECT: ${{ matrix.component.project }}
+          SIG_SOURCE_REF: ${{ matrix.component.ref }}
+        run: |
+          source_url="https://gitlab.com/CentOS/cloud/rpms/${SIG_PROJECT}.git"
+          git clone --depth 1 --single-branch \
+            --branch "$SIG_SOURCE_REF" "$source_url" "$GITHUB_WORKSPACE/source"
+          source_commit=$(git -C "$GITHUB_WORKSPACE/source" rev-parse HEAD)
+          echo "Using ${SIG_PROJECT} source commit ${source_commit}"
+
+      - name: Download package sources
+        run: |
+          cd "$GITHUB_WORKSPACE/source"
+          centpkg-sig sources
+
+      - name: Build package RPMs locally
+        env:
+          SIG_PACKAGE: ${{ matrix.component.project }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/source"
+          spec="SPECS/${SIG_PACKAGE}.spec"
+          if [ ! -f "$spec" ] || [ ! -f sources ]; then
+            echo "Expected $spec and the package sources manifest."
+            exit 1
+          fi
+          topdir="$GITHUB_WORKSPACE/rpmbuild"
+          mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          while IFS= read -r filename; do
+            source_file="$filename"
+            if [ ! -f "$source_file" ] && [ -f "SOURCES/$filename" ]; then
+              source_file="SOURCES/$filename"
+            fi
+            if [ ! -f "$source_file" ]; then
+              echo "Missing lookaside source: $filename"
+              exit 1
+            fi
+            cp "$source_file" "$topdir/SOURCES/"
+          done < <(sed -nE 's/^[^ ]+ \(([^)]+)\) = .*/\1/p' sources)
+          if [ -d SOURCES ]; then
+            cp -a SOURCES/. "$topdir/SOURCES/"
+          fi
+          dnf builddep -y "$spec"
+          rpmbuild -ba "$spec" \
+            --define "_topdir $topdir" \
+            --define "_sourcedir $topdir/SOURCES"
+          if ! find "$topdir/RPMS" -type f -name '*.rpm' -print -quit \
+            | grep -q .; then
+            echo "Local rpmbuild produced no RPM artifacts."
+            exit 1
+          fi
+
+      - name: Archive CentOS SIG source build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.component.name }}-rpms-centos-sig-el9
+          path: rpmbuild/RPMS/**/*.rpm
+          if-no-files-found: error
