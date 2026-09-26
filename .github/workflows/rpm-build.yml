@@ -30,6 +30,7 @@ jobs:
           - name: cri-tools
             repository: kubernetes-sigs/cri-tools
             ref: master
+            rpm_spec_template: .github/rpm-specs/cri-tools.spec.in
           - name: oc
             repository: openshift/oc
             ref: main
@@ -37,6 +38,7 @@ jobs:
           - name: conmon-rs
             repository: containers/conmon-rs
             ref: main
+            rpm_spec_template: .github/rpm-specs/conmon-rs.spec.in
           - name: crio-credential-provider
             repository: openshift/crio-credential-provider
             ref: main
@@ -64,30 +66,53 @@ jobs:
             cargo \
             findutils
 
+      - name: Checkout RPM Spec Templates
+        uses: actions/checkout@v4
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.component.repository }}
           ref: ${{ matrix.component.ref }}
           fetch-depth: 1
+          path: source
 
       - name: Build RPMs
         run: |
+          cd "$GITHUB_WORKSPACE/source"
           echo "Starting build for ${{ matrix.component.name }} on CentOS Stream ${{ matrix.os_version }}..."
           
           # Fix git ownership issue in container
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/source"
           
           # Generic Metadata Extraction
-          # Try to get version from tags or commit, fall back to 0.0.1
+          # Shallow checkouts may not contain tags, so use a valid fallback.
           COMMIT=$(git rev-parse --short HEAD)
-          VERSION_RAW=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.1")
-          
+          VERSION_RAW=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          VERSION_RAW="${VERSION_RAW#v}"
+
           if [ "${{ matrix.component.name }}" == "kubernetes" ]; then
             # Override with Kubernetes specialized versioning if possible
-            VERSION_RAW=$(sed -rn 's/.*io.openshift.build.versions="kubernetes=(1.[0-9]+.[0-9]+(-rc.[0-9])?)"/\1/p' openshift-hack/images/hyperkube/Dockerfile.rhel || echo "$VERSION_RAW")
+            KUBERNETES_VERSION=$(sed -rn 's/.*io.openshift.build.versions="kubernetes=(1\.[0-9]+\.[0-9]+(-rc\.[0-9])?)".*/\1/p' openshift-hack/images/hyperkube/Dockerfile.rhel | head -n 1)
+            VERSION_RAW="${KUBERNETES_VERSION:-$VERSION_RAW}"
+          elif [ "${{ matrix.component.name }}" == "cri-o" ]; then
+            CRIO_VERSION=$(sed -rn 's/^[[:space:]]*var Version = "([^"]+)".*/\1/p' internal/version/version.go | head -n 1)
+            VERSION_RAW="${CRIO_VERSION:-$VERSION_RAW}"
+          elif [ "${{ matrix.component.name }}" == "conmon-rs" ]; then
+            VERSION_RAW=$(sed -n 's/^[[:space:]]*version = "\([^"]*\)".*/\1/p' conmon-rs/common/Cargo.toml | head -n 1 | tr '-' '~')
           fi
-          
+
+          if [ -z "$VERSION_RAW" ]; then
+            VERSION_RAW="0.0.1"
+          fi
+
+          SPEC="${{ matrix.component.spec_file }}"
+          SPEC_TEMPLATE="${{ matrix.component.rpm_spec_template }}"
+          if [ -n "$SPEC_TEMPLATE" ]; then
+            SPEC="$RUNNER_TEMP/${{ matrix.component.name }}.spec"
+            sed "s/@VERSION@/$VERSION_RAW/g" "$GITHUB_WORKSPACE/$SPEC_TEMPLATE" > "$SPEC"
+          fi
+
           VERSION="v${VERSION_RAW}"
           export OS_GIT_VERSION="${VERSION}+${COMMIT}"
           export OS_GIT_COMMIT="${COMMIT}"
@@ -99,13 +124,14 @@ jobs:
           echo "Build Metadata:"
           echo "  OS_GIT_VERSION: $OS_GIT_VERSION"
 
+          export GOTOOLCHAIN=auto
+
           # Install goversioninfo (missing in EL9 repos but needed by oc)
           go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
           export PATH=$PATH:$(go env GOPATH)/bin
 
           # Install build dependencies if spec exists
-          if [ -n "${{ matrix.component.spec_file }}" ]; then
-            SPEC="${{ matrix.component.spec_file }}"
+          if [ -n "$SPEC" ]; then
             # Hack for oc: remove goversioninfo dependency if not in repo
             if [ "$SPEC" == "oc.spec" ]; then
               sed -i '/BuildRequires:.*goversioninfo/d' "$SPEC"
@@ -117,17 +143,23 @@ jobs:
             echo "Using explicit build script: ${{ matrix.component.build_script }}"
             chmod +x "${{ matrix.component.build_script }}"
             ./${{ matrix.component.build_script }}
-          elif [ -f "Makefile" ] && make -n rpm >/dev/null 2>&1; then
-            echo "Makefile has rpm target, using make rpm..."
-            make rpm
-          elif [ -n "${{ matrix.component.spec_file }}" ]; then
-            echo "Falling back to manual rpmbuild with ${{ matrix.component.spec_file }}..."
-            SPEC="${{ matrix.component.spec_file }}"
+          elif [ -n "$SPEC" ]; then
+            echo "Building RPM from $SPEC..."
             NAME=$(rpmspec -q --qf "%{name}\n" "$SPEC" | head -n 1)
             VERSION_SPEC=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
             mkdir -p _rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-            tar -czf "_rpmbuild/SOURCES/${NAME}-${VERSION_SPEC}.tar.gz" --exclude='.git' --transform="s|^.|$NAME-$VERSION_SPEC|" ./
-            rpmbuild -ba "$SPEC" --define "_topdir $PWD/_rpmbuild" --define "version $VERSION_RAW" --define "release 1" --define "commit $COMMIT"
+            tar -czf "_rpmbuild/SOURCES/${NAME}-${VERSION_SPEC}.tar.gz" \
+              --exclude='./.git' \
+              --exclude='./_output' \
+              --exclude='./_rpmbuild' \
+              --transform="s|^.|$NAME-$VERSION_SPEC|" ./
+            rpmbuild -ba "$SPEC" \
+              --define "_topdir $PWD/_rpmbuild" \
+              --define "release 1" \
+              --define "commit $COMMIT"
+          elif [ -f "Makefile" ] && make -n rpm >/dev/null 2>&1; then
+            echo "Makefile has rpm target, using make rpm..."
+            make rpm
           else
             echo "No build script, Makefile rpm target, or .spec file defined."
             exit 1
@@ -138,8 +170,8 @@ jobs:
         with:
           name: ${{ matrix.component.name }}-rpms-el${{ matrix.os_version }}
           path: |
-            _output/local/releases/rpms/
-            _output/releases/rpms/
-            RPMS/
-            _rpmbuild/RPMS/
+            source/_output/local/releases/rpms/
+            source/_output/releases/rpms/
+            source/RPMS/
+            source/_rpmbuild/RPMS/
           if-no-files-found: warn

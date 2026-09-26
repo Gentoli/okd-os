@@ -23,3 +23,13 @@ dnf install -y git rpm-build rsync createrepo gcc gcc-c++ make golang krb5-devel
 The last command fails because `rpkg` cannot be resolved. The same install command without `rpkg` is the corrected workflow command.
 
 Upstream [`openshift/kubernetes`'s `openshift-hack/build-rpms.sh`](https://github.com/openshift/kubernetes/blob/master/openshift-hack/build-rpms.sh) checks for `rpmbuild` and `createrepo`; it does not require `rpkg`. The script explains that its RPM build runs through the upstream Makefile invoked by the spec file.
+
+## Remaining component failures
+
+Run [36220445413](https://github.com/Gentoli/okd-os/actions/runs/36220445413) confirmed the Kubernetes RPM built, but five other matrix jobs failed:
+
+- CRI-O received an empty `OS_GIT_VERSION`: a shallow checkout has no tags, and the previous `git describe | sed || echo` pipeline succeeded with empty output. The workflow now falls back to a valid version and reads CRI-O's version from `internal/version/version.go`.
+- `cri-tools` has a `make binaries` target but no RPM target or spec in its upstream repository. Its current `go.mod` requires Go 1.27, while the EL9 Go package defaults to `GOTOOLCHAIN=local`; the workflow now enables automatic Go toolchain selection. `conmon-rs`'s [upstream `make rpm` target](https://github.com/containers/conmon-rs/blob/main/Makefile) invokes `rpkg local`. The EL9 `python3-rpkg` package contains the Python library but does not install the `rpkg` executable. Local RPM spec templates now build both upstream projects with `rpmbuild`; the conmon version comes from its Cargo manifest.
+- The `oc` and CRI-O credential-provider fallback commands created the source archive under `_rpmbuild` while archiving the whole checkout. Tar then read the archive while it was being written. Excluding `_rpmbuild` and `_output` prevents generated files from entering their source archives. Manual spec builds now use the spec's own version so the source archive and spec stay aligned.
+
+The workflow's CentOS Stream 9 and EPEL repositories provide the conmon build requirements (`capnproto` and `protobuf-compiler`) through `dnf builddep` on its spec.
