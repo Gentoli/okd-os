@@ -86,17 +86,15 @@ jobs:
             '
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Prepare registry auth file
+        env:
+          REGISTRY_AUTH_FILE: ${{ runner.temp }}/ghcr-auth.json
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          install -m 0644 \
-            "$HOME/.docker/config.json" \
-            "$RUNNER_TEMP/ghcr-auth.json"
+          set -euo pipefail
+          printf '%s' "$REGISTRY_PASSWORD" | skopeo login \
+            --authfile "$REGISTRY_AUTH_FILE" \
+            --username "$GITHUB_ACTOR" \
+            --password-stdin ghcr.io
 
       - name: Publish c9s base image
         env:
