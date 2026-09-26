@@ -133,9 +133,17 @@ does not claim to be a clean upstream build.
 - The corresponding compatibility patch is
   [`0001-drop-unresolvable-fwupd-plugin.patch`](../../os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch).
   [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml) applies
-  it to the pinned config checkout, builds the `c9s` variant with COSA, and
-  runs on pushes to any branch when the workflow or patch files change. It
-  publishes a tag for the triggering `okd-os` commit; only pushes to `main`
-  update the rolling `c9s` tag at `ghcr.io/<owner>/okd-os-scos-base`. It
-  requires a runner with `/dev/kvm`; the workflow fails early if that device
-  is unavailable.
+  it to the `coreos/rhel-coreos-config` checkout and builds the `c9s` variant
+  with COSA. Pushes run only on `main` when the workflow or patch files change.
+  Workflow dispatch accepts an upstream config ref (default `HEAD`, which
+  checks out the repository's default branch) and an extra image tag (default
+  `c9s`). Both push and dispatch also publish a commit-specific
+  `c9s-<okd-os SHA>` tag to `ghcr.io/<owner>/okd-os-scos-base`. The checkout
+  directory is configured through the workflow-level `COREOS_CONFIG_PATH`
+  environment variable.
+- The publishing step authenticates with `docker/login-action`. Skopeo's
+  containers/image auth lookup checks its containers auth files and falls back
+  to `$HOME/.docker/config.json`, where Docker login stores credentials. The
+  login action's post-job cleanup logs out at the end of the job.
+- The COSA job container requires a runner with `/dev/kvm`; the workflow fails
+  early if that device is unavailable.

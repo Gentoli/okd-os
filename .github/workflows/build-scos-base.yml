@@ -53,7 +53,7 @@ jobs:
             exit 1
           fi
 
-          dnf install -y nodejs
+          dnf install -y nodejs docker-cli
 
           kvm_gid=$(stat -c '%g' /dev/kvm)
           if kvm_group=$(getent group "$kvm_gid"); then
@@ -69,11 +69,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Checkout pinned CoreOS config
+      - name: Checkout CoreOS config
         uses: actions/checkout@v4
         with:
           repository: coreos/rhel-coreos-config
-          ref: ${{ inputs.config_ref || 'HEAD' }}
+          ref: ${{ inputs.config_ref != 'HEAD' && inputs.config_ref || '' }}
           path: ${{ env.COREOS_CONFIG_PATH }}
           submodules: recursive
           persist-credentials: false
