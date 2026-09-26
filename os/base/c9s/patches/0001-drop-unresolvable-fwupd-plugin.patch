@@ -1,0 +1,16 @@
+diff --git a/manifest-el9-shared.yaml b/manifest-el9-shared.yaml
+index df970fd..072cd49 100644
+--- a/manifest-el9-shared.yaml
++++ b/manifest-el9-shared.yaml
+@@ -25,11 +25,5 @@ packages:
+ # Arch specific packages that we need to keep the same package set in EL9.
+ conditional-include:
+-  # Couldn't include fwupd-plugin-flashrom above because s390x
+-  # doesn't have that package.
+-  - if: basearch != "s390x"
+-    include:
+-      packages:
+-        - fwupd-plugin-flashrom
+   # For some reason libxcrypt-compat was only installed on x86_64
+   - if: basearch == "x86_64"
+     include:

@@ -1,0 +1,139 @@
+name: Build and Publish SCOS Base
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-scos-base.yml
+      - os/base/c9s/patches/**
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Additional GHCR image tag
+        required: true
+        default: c9s
+        type: string
+      config_ref:
+        description: Branch, tag, or commit of coreos/rhel-coreos-config
+        required: true
+        default: HEAD
+        type: string
+
+env:
+  COREOS_CONFIG_PATH: os/base/c9s/source
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-scos-base-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/coreos-assembler/coreos-assembler:latest
+      options: >-
+        --user 0
+        --privileged
+        --device /dev/kvm
+        --device /dev/fuse
+        --tmpfs /tmp
+      volumes:
+        - /var/tmp:/var/tmp
+    steps:
+      - name: Prepare COSA container
+        run: |
+          set -euo pipefail
+          if [[ ! -e /dev/kvm ]]; then
+            echo "::error::COSA requires /dev/kvm for this build."
+            exit 1
+          fi
+
+          dnf install -y nodejs docker-cli
+
+          kvm_gid=$(stat -c '%g' /dev/kvm)
+          if kvm_group=$(getent group "$kvm_gid"); then
+            kvm_group=${kvm_group%%:*}
+          else
+            kvm_group="runner-kvm-${kvm_gid}"
+            groupadd --gid "$kvm_gid" "$kvm_group"
+          fi
+          usermod --append --groups "$kvm_group" builder
+
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout CoreOS config
+        uses: actions/checkout@v4
+        with:
+          repository: coreos/rhel-coreos-config
+          ref: ${{ inputs.config_ref != 'HEAD' && inputs.config_ref || '' }}
+          path: ${{ env.COREOS_CONFIG_PATH }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Apply local c9s patches
+        working-directory: ${{ env.COREOS_CONFIG_PATH }}
+        run: |
+          set -euo pipefail
+          patch="$GITHUB_WORKSPACE/os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch"
+          git apply --check "$patch"
+          git apply "$patch"
+          git diff --check
+
+      - name: Build c9s base image
+        run: |
+          set -euo pipefail
+          build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
+          mkdir -p "$build_dir"
+          chown builder:builder "$build_dir"
+          runuser -u builder -- env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            COREOS_CONFIG_PATH="$COREOS_CONFIG_PATH" \
+            /bin/bash -euo pipefail -c '
+              cd "$GITHUB_WORKSPACE/os/base/c9s/build"
+              coreos-assembler init --variant c9s \
+                "$GITHUB_WORKSPACE/$COREOS_CONFIG_PATH"
+              coreos-assembler build
+            '
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish c9s base image
+        env:
+          IMAGE_TAG: ${{ inputs.tag || 'c9s' }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/os/base/c9s/build"
+          image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/okd-os-scos-base"
+          immutable_tag="c9s-${GITHUB_SHA:0:12}"
+          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid GHCR image tag: $IMAGE_TAG" >&2
+            exit 1
+          fi
+          mapfile -t archives < <(
+            find builds -type f \
+              -path "*/x86_64/scos-*-ostree.x86_64.ociarchive" -print
+          )
+          if (( ${#archives[@]} != 1 )); then
+            echo "Expected one x86_64 SCOS OCI archive," \
+              "found ${#archives[@]}." >&2
+            exit 1
+          fi
+
+          skopeo copy \
+            "oci-archive:${archives[0]}" \
+            "docker://${image_ref}:${immutable_tag}"
+          skopeo copy \
+            "oci-archive:${archives[0]}" \
+            "docker://${image_ref}:${IMAGE_TAG}"
