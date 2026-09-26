@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - .github/workflows/build-scos-base.yml
-      - os/base/c9s/patches/**
   workflow_dispatch:
 
 permissions:
