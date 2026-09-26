@@ -169,9 +169,8 @@ jobs:
             source/_rpmbuild/RPMS/
           if-no-files-found: warn
 
-  build-rpms-cbs:
-    name: Build ${{ matrix.component.name }} with CBS (EL9)
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+  build-rpms-centos-sig:
+    name: Build ${{ matrix.component.name }} from CentOS SIG source (EL9)
     runs-on: ubuntu-latest
     timeout-minutes: 240
     container:
@@ -193,93 +192,70 @@ jobs:
               project: conmon-rs
               ref: c9s-sig-cloud
     steps:
-      - name: Install CBS client
+      - name: Install local RPM build tools
         run: |
           dnf install -y epel-release
+          dnf install -y epel-next-release dnf-plugins-core
+          dnf config-manager --set-enabled crb
           dnf makecache
-          dnf install -y git koji
+          dnf install -y \
+            centpkg-sig \
+            gcc \
+            gcc-c++ \
+            git \
+            go-rpm-macros \
+            golang \
+            make \
+            rpm-build
 
-      - name: Configure CBS credentials
+      - name: Checkout CentOS SIG package source
         env:
-          CBS_CLIENT_CERT: ${{ secrets.CBS_CLIENT_CERT }}
-          CBS_SERVER_CA_CERT: ${{ secrets.CBS_SERVER_CA_CERT }}
+          SIG_PROJECT: ${{ matrix.component.project }}
+          SIG_SOURCE_REF: ${{ matrix.component.ref }}
         run: |
-          if [ -z "$CBS_CLIENT_CERT" ] || [ -z "$CBS_SERVER_CA_CERT" ]; then
-            echo "Configure CBS certificate secrets before submitting builds."
-            echo "Required: CBS_CLIENT_CERT and CBS_SERVER_CA_CERT."
+          source_url="https://gitlab.com/CentOS/cloud/rpms/${SIG_PROJECT}.git"
+          git clone --depth 1 --single-branch \
+            --branch "$SIG_SOURCE_REF" "$source_url" "$GITHUB_WORKSPACE/source"
+          echo "Using ${SIG_PROJECT} source commit $(git -C "$GITHUB_WORKSPACE/source" rev-parse HEAD)"
+
+      - name: Download package sources
+        run: |
+          cd "$GITHUB_WORKSPACE/source"
+          centpkg-sig sources
+
+      - name: Build package RPMs locally
+        env:
+          SIG_PACKAGE: ${{ matrix.component.project }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/source"
+          spec="SPECS/${SIG_PACKAGE}.spec"
+          if [ ! -f "$spec" ] || [ ! -f sources ]; then
+            echo "Expected $spec and the package sources manifest."
             exit 1
           fi
-          umask 077
-          printf '%s\n' "$CBS_CLIENT_CERT" > "$HOME/.centos.cert"
-          printf '%s\n' "$CBS_SERVER_CA_CERT" > "$HOME/.centos-server-ca.cert"
-          cat > "$RUNNER_TEMP/cbs-koji.conf" <<EOF
-          [cbs]
-          server = https://cbs.centos.org/kojihub
-          weburl = https://cbs.centos.org/koji
-          topurl = https://cbs.centos.org/kojifiles
-          authtype = ssl
-          cert = $HOME/.centos.cert
-          serverca = $HOME/.centos-server-ca.cert
-          EOF
-
-      - name: Submit CBS scratch build
-        id: submit
-        env:
-          CBS_PROJECT: ${{ matrix.component.project }}
-          CBS_SOURCE_REF: ${{ matrix.component.ref }}
-          CBS_TARGET: cloud9s-okd-4.20-el9s
-        run: |
-          source_url="https://gitlab.com/CentOS/cloud/rpms/${CBS_PROJECT}.git"
-          source_commit=$(
-            git ls-remote "$source_url" "refs/heads/${CBS_SOURCE_REF}" |
-              awk 'NR == 1 { print $1 }'
-          )
-          if [ -z "$source_commit" ]; then
-            echo "Could not resolve ${source_url} branch ${CBS_SOURCE_REF}."
-            exit 1
-          fi
-          source_scm="git+${source_url}#${source_commit}"
-          build_output=$(
-            koji --config "$RUNNER_TEMP/cbs-koji.conf" --profile cbs \
-              build --scratch --nowait "$CBS_TARGET" "$source_scm" 2>&1
-          ) || {
-            printf '%s\n' "$build_output"
-            exit 1
-          }
-          printf '%s\n' "$build_output"
-          task_id=$(
-            sed -nE 's/.*Created task: ([0-9]+).*/\1/p' \
-              <<< "$build_output" | tail -n 1
-          )
-          if [ -z "$task_id" ]; then
-            echo "CBS did not return a task ID."
-            exit 1
-          fi
-          echo "task_id=$task_id" >> "$GITHUB_OUTPUT"
-
-      - name: Wait for CBS build
-        env:
-          CBS_TASK_ID: ${{ steps.submit.outputs.task_id }}
-        run: |
-          koji --config "$RUNNER_TEMP/cbs-koji.conf" --profile cbs \
-            watch-task "$CBS_TASK_ID"
-
-      - name: Download CBS RPMs
-        env:
-          CBS_TASK_ID: ${{ steps.submit.outputs.task_id }}
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/cbs-rpms"
-          cd "$GITHUB_WORKSPACE/cbs-rpms"
-          koji --config "$RUNNER_TEMP/cbs-koji.conf" --profile cbs \
-            download-task "$CBS_TASK_ID"
-          if ! find . -type f -name '*.rpm' -print -quit | grep -q .; then
-            echo "CBS task ${CBS_TASK_ID} produced no RPM artifacts."
+          topdir="$GITHUB_WORKSPACE/rpmbuild"
+          mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          while IFS= read -r filename; do
+            if [ ! -f "$filename" ]; then
+              echo "Missing lookaside source: $filename"
+              exit 1
+            fi
+            cp "$filename" "$topdir/SOURCES/"
+          done < <(sed -nE 's/^[^ ]+ \(([^)]+)\) = .*/\1/p' sources)
+          cp -a SOURCES/. "$topdir/SOURCES/" 2>/dev/null || true
+          dnf builddep -y "$spec"
+          rpmbuild -ba "$spec" \
+            --define "_topdir $topdir" \
+            --define "_sourcedir $topdir/SOURCES"
+          if ! find "$topdir/RPMS" -type f -name '*.rpm' -print -quit | grep -q .; then
+            echo "Local rpmbuild produced no RPM artifacts."
             exit 1
           fi
 
-      - name: Archive CBS RPM artifacts
+      - name: Archive CentOS SIG source build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.component.name }}-rpms-cbs-el9
-          path: cbs-rpms/**/*.rpm
+          name: ${{ matrix.component.name }}-rpms-centos-sig-el9
+          path: rpmbuild/RPMS/**/*.rpm
           if-no-files-found: error
