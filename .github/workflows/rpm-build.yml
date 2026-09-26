@@ -179,7 +179,7 @@ jobs:
             source/_output/releases/rpms/
             source/RPMS/
             source/_rpmbuild/RPMS/
-          if-no-files-found: warn
+          if-no-files-found: error
 
   build-rpms-centos-sig:
     name: Build ${{ matrix.component.name }} from CentOS SIG source (EL9)
