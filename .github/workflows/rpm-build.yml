@@ -300,12 +300,23 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/rpm-test-report"
-          printf "RPM and binary version report\n" \
-            > "$GITHUB_WORKSPACE/rpm-test-report/rpm-versions.txt"
+          printf "RPM and binary version report\n" > \
+            "$GITHUB_WORKSPACE/rpm-test-report/rpm-versions.txt"
           dnf install -y dnf-plugins-core epel-release epel-next-release
           dnf config-manager --set-enabled crb
           dnf makecache
-          python3 - <<'PY'
+          mapfile -d "" rpms < <(
+            find "$GITHUB_WORKSPACE/rpms" -type f -name "*.rpm" -print0
+          )
+          if [ "${#rpms[@]}" -eq 0 ]; then
+            echo "No RPM artifacts were downloaded." >&2
+            exit 1
+          fi
+          dnf install -y "${rpms[@]}"
+        shell: bash
+
+      - name: Check binaries and record full version output
+        run: |
           import os
           import shlex
           import stat
@@ -315,8 +326,13 @@ jobs:
           workspace = Path(os.environ["GITHUB_WORKSPACE"])
           report_path = workspace / "rpm-test-report" / "rpm-versions.txt"
           rpm_files = sorted((workspace / "rpms").rglob("*.rpm"))
-          if not rpm_files:
-              raise SystemExit("No RPM artifacts were downloaded.")
+          binary_dirs = (
+              "/bin/",
+              "/sbin/",
+              "/usr/bin/",
+              "/usr/sbin/",
+              "/usr/libexec/",
+          )
 
           def rpm_query(rpm_file, query):
               result = subprocess.run(
@@ -339,15 +355,15 @@ jobs:
               )
               for entry in file_entries.splitlines():
                   mode, path = entry.split("\t", 1)
-                  if stat.S_ISREG(int(mode)) and int(mode) & 0o111:
+                  if (
+                      path.startswith(binary_dirs)
+                      and (
+                          stat.S_ISREG(int(mode))
+                          or stat.S_ISLNK(int(mode))
+                      )
+                      and int(mode) & 0o111
+                  ):
                       binaries.setdefault(path, set()).add(package)
-
-          install = subprocess.run(
-              ["dnf", "install", "-y", *(str(path) for path in rpm_files)]
-          )
-          if install.returncode:
-              report_path.write_text("\n".join(report) + "\n")
-              raise SystemExit(install.returncode)
 
           version_args = {
               "/usr/bin/oc": ["version", "--client"],
@@ -362,14 +378,16 @@ jobs:
               if not path.is_file() or not os.access(path, os.X_OK):
                   failures.append(binary)
                   report.extend(
-                      ["", f"$ {binary} (from {owners_text})", "NOT FOUND OR NOT EXECUTABLE"]
+                      [
+                          "",
+                          f"$ {binary} (from {owners_text})",
+                          "NOT FOUND OR NOT EXECUTABLE",
+                      ]
                   )
                   continue
 
               args = [binary, *version_args.get(binary, ["--version"])]
-              report.extend(
-                  ["", f"$ {shlex.join(args)} (from {owners_text})"]
-              )
+              report.extend(["", f"$ {shlex.join(args)} (from {owners_text})"])
               try:
                   result = subprocess.run(
                       args,
@@ -388,6 +406,8 @@ jobs:
                   if isinstance(output, bytes):
                       output = output.decode(errors="replace")
                   report.extend(output.rstrip().splitlines())
+              except OSError as error:
+                  report.append(f"could not run version probe: {error}")
 
           report_path.write_text("\n".join(report) + "\n")
           print(report_path.read_text())
@@ -398,7 +418,7 @@ jobs:
                   "RPM binaries are missing or not executable: "
                   + ", ".join(failures)
               )
-          PY
+        shell: python3 {0}
 
       - name: Archive RPM version report
         if: always()
