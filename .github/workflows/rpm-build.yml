@@ -146,7 +146,7 @@ jobs:
             --exclude='./.git' \
             --exclude='./_output' \
             --exclude='./_rpmbuild' \
-            --transform="s|^.|$NAME-$VERSION_SPEC|" ./
+            --transform="s|^|$NAME-$VERSION_SPEC/|rSH" ./
           rpmbuild -ba "$SPEC" \
             --define "_topdir $PWD/_rpmbuild" \
             --define "release 1" \
