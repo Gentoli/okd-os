@@ -134,6 +134,8 @@ does not claim to be a clean upstream build.
   [`0001-drop-unresolvable-fwupd-plugin.patch`](../../os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch).
   [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml) applies
   it to the pinned config checkout, builds the `c9s` variant with COSA, and
-  publishes a tag for the triggering `okd-os` commit and the rolling `c9s`
-  tag to `ghcr.io/<owner>/okd-os-scos-base`. It requires a runner with
-  `/dev/kvm`; the workflow fails early if that device is unavailable.
+  runs on pushes to any branch when the workflow or patch files change. It
+  publishes a tag for the triggering `okd-os` commit; only pushes to `main`
+  update the rolling `c9s` tag at `ghcr.io/<owner>/okd-os-scos-base`. It
+  requires a runner with `/dev/kvm`; the workflow fails early if that device
+  is unavailable.
