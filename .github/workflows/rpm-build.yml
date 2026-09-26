@@ -311,4 +311,46 @@ jobs:
               fi
               printf "Installing %d RPMs\n" "${#rpms[@]}"
               dnf install -y "${rpms[@]}"
+
+              declare -a bins=()
+              declare -A seen_bins=()
+              for rpm_file in "${rpms[@]}"; do
+                while IFS= read -r bin; do
+                  case "$bin" in
+                    /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*)
+                      if [ -f "$bin" ] && [ -x "$bin" ] &&
+                        [ -z "${seen_bins[$bin]+x}" ]; then
+                        seen_bins["$bin"]=1
+                        bins+=("$bin")
+                      fi
+                      ;;
+                  esac
+                done < <(rpm -qpl "$rpm_file")
+              done
+              if [ "${#bins[@]}" -eq 0 ]; then
+                echo "No executable binaries were found in the RPMs." >&2
+                exit 1
+              fi
+              for bin in "${bins[@]}"; do
+                printf "Checking %s\n" "$bin"
+                if output=$(timeout 30s "$bin" --version 2>&1); then
+                  if [ -z "$output" ] ||
+                    ! grep -Eq "(^|[^[:alnum:]])v?[0-9]+\.[0-9]+" <<< "$output"; then
+                    echo "$bin --version did not report a version." >&2
+                    printf "%s\n" "$output" >&2
+                    exit 1
+                  fi
+                  printf "%s\n" "$output"
+                else
+                  version_status=$?
+                  if help_output=$(timeout 30s "$bin" --help 2>&1); then
+                    echo "$bin has no working --version option; --help succeeded."
+                  else
+                    help_status=$?
+                    echo "$bin failed --version ($version_status) and --help ($help_status)." >&2
+                    printf "%s\n%s\n" "$output" "$help_output" >&2
+                    exit 1
+                  fi
+                fi
+              done
             '
