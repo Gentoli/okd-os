@@ -76,8 +76,10 @@ For SCOS, the public source-based alternative is to build the base rather than
 substitute another release image:
 
 - [`coreos/rhel-coreos-config`'s SCOS development guide](https://github.com/coreos/rhel-coreos-config/blob/45a6e864f6829e852fd17174cd9da1e13b4e70fa/docs/development-scos.md)
-  documents using COSA with `cosa init --variant scos`, `cosa fetch`, and
-  `cosa build`.
+  documents building the SCOS base with COSA. At this pinned config commit the
+  actual variant is `c9s` (not `scos`); `cosa init --variant scos` fails because
+  there are no `manifest-scos.yaml` or `image-scos.yaml` files. `cosa fetch`
+  also reports that it is skipped because build-with-buildah is now the default.
 - Its [`c9s` build arguments](https://github.com/coreos/rhel-coreos-config/blob/45a6e864f6829e852fd17174cd9da1e13b4e70fa/build-args-c9s.conf)
   use the public `quay.io/centos-bootc/centos-bootc:stream9` image as a build
   input. That image is a builder input, not the resulting CoreOS base; the
@@ -105,3 +107,33 @@ wrong image layer.
 4.21 and an RHEL 9.6 base, while the same commit's package manifest targets
 OpenShift 4.22 and its CI repository setup includes RHEL 9.8. Treat those
 example version strings as stale for this snapshot.
+
+## Attempted COSA build
+
+I ran the pinned `coreos/rhel-coreos-config` build in a temporary directory
+using the public `quay.io/coreos-assembler/coreos-assembler:latest` builder.
+Because a GitHub source archive does not include `.git` metadata, the local
+test initialized synthetic Git metadata; the published artifact therefore
+does not claim to be a clean upstream build.
+
+- `cosa init --variant scos` failed as described above. Retrying with the
+  config's actual `c9s` variant initialized successfully; `cosa fetch` was a
+  no-op.
+- The unmodified `cosa build` failed at RPM resolution with
+  `Packages not found: fwupd-plugin-flashrom`. A separate DNF query against
+  the public Stream 9 repositories did list that RPM, so the exact reason it
+  was unavailable to the compose was not determined.
+- Removing the `fwupd-plugin-flashrom` conditional package block in the
+  temporary source let the diagnostic build complete. COSA built and imported
+  a bootable x86_64 SCOS OCI image, tagged
+  `9.0.20260926-dev0`, with OCI digest
+  `sha256:fbd97dca3b40485db686561c6d289dd2bc26466b558cb0cd6844ad34e00a287f`.
+  The OCI archive was about 1.35 GB. This is a test result, not a pristine
+  reproducible build.
+- The corresponding compatibility patch is
+  [`0001-drop-unresolvable-fwupd-plugin.patch`](../../os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch).
+  [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml) applies
+  it to the pinned config checkout, builds the `c9s` variant with COSA, and
+  publishes a tag for the triggering `okd-os` commit and the rolling `c9s`
+  tag to `ghcr.io/<owner>/okd-os-scos-base`. It requires a runner with
+  `/dev/kvm`; the workflow fails early if that device is unavailable.
