@@ -21,24 +21,11 @@ jobs:
           - name: kubernetes
             repository: openshift/kubernetes
             ref: master
-            build_script: openshift-hack/build-rpms.sh
             spec_file: openshift.spec
-          - name: cri-o
-            repository: cri-o/cri-o
-            ref: main
-            build_script: hack/build-rpms.sh
-          - name: cri-tools
-            repository: kubernetes-sigs/cri-tools
-            ref: master
-            rpm_spec_template: .github/rpm-specs/cri-tools.spec.in
           - name: oc
             repository: openshift/oc
             ref: main
             spec_file: oc.spec
-          - name: conmon-rs
-            repository: containers/conmon-rs
-            ref: main
-            rpm_spec_template: .github/rpm-specs/conmon-rs.spec.in
           - name: crio-credential-provider
             repository: openshift/crio-credential-provider
             ref: main
@@ -66,7 +53,7 @@ jobs:
             cargo \
             findutils
 
-      - name: Checkout RPM Spec Templates
+      - name: Checkout Workflow Repository
         uses: actions/checkout@v4
 
       - name: Checkout Repository
@@ -80,11 +67,12 @@ jobs:
       - name: Build RPMs
         run: |
           cd "$GITHUB_WORKSPACE/source"
-          echo "Starting build for ${{ matrix.component.name }} on CentOS Stream ${{ matrix.os_version }}..."
-          
+          echo "Building ${{ matrix.component.name }} on CentOS Stream"
+          echo "  version ${{ matrix.os_version }}"
+
           # Fix git ownership issue in container
           git config --global --add safe.directory "$GITHUB_WORKSPACE/source"
-          
+
           # Generic Metadata Extraction
           # Shallow checkouts may not contain tags, so use a valid fallback.
           COMMIT=$(git rev-parse --short HEAD)
@@ -93,13 +81,13 @@ jobs:
 
           if [ "${{ matrix.component.name }}" == "kubernetes" ]; then
             # Override with Kubernetes specialized versioning if possible
-            KUBERNETES_VERSION=$(sed -rn 's/.*io.openshift.build.versions="kubernetes=(1\.[0-9]+\.[0-9]+(-rc\.[0-9])?)".*/\1/p' openshift-hack/images/hyperkube/Dockerfile.rhel | head -n 1)
+            KUBERNETES_VERSION=$(
+              grep -oE \
+                'kubernetes=1\.[0-9]+\.[0-9]+(-rc\.[0-9])?' \
+                openshift-hack/images/hyperkube/Dockerfile.rhel |
+                head -n 1 | cut -d= -f2
+            )
             VERSION_RAW="${KUBERNETES_VERSION:-$VERSION_RAW}"
-          elif [ "${{ matrix.component.name }}" == "cri-o" ]; then
-            CRIO_VERSION=$(sed -rn 's/^[[:space:]]*var Version = "([^"]+)".*/\1/p' internal/version/version.go | head -n 1)
-            VERSION_RAW="${CRIO_VERSION:-$VERSION_RAW}"
-          elif [ "${{ matrix.component.name }}" == "conmon-rs" ]; then
-            VERSION_RAW=$(sed -n 's/^[[:space:]]*version = "\([^"]*\)".*/\1/p' conmon-rs/common/Cargo.toml | head -n 1 | tr '-' '~')
           fi
 
           if [ -z "$VERSION_RAW" ]; then
@@ -107,10 +95,9 @@ jobs:
           fi
 
           SPEC="${{ matrix.component.spec_file }}"
-          SPEC_TEMPLATE="${{ matrix.component.rpm_spec_template }}"
-          if [ -n "$SPEC_TEMPLATE" ]; then
-            SPEC="$RUNNER_TEMP/${{ matrix.component.name }}.spec"
-            sed "s/@VERSION@/$VERSION_RAW/g" "$GITHUB_WORKSPACE/$SPEC_TEMPLATE" > "$SPEC"
+          if [ -z "$SPEC" ] || [ ! -f "$SPEC" ]; then
+            echo "A valid RPM spec_file is required for this build job."
+            exit 1
           fi
 
           VERSION="v${VERSION_RAW}"
@@ -120,58 +107,54 @@ jobs:
           export OS_GIT_MINOR=$(echo $VERSION_RAW | cut -d. -f2)
           export OS_GIT_PATCH=$(echo $VERSION_RAW | cut -d. -f3)
           export OS_GIT_TREE_STATE="dirty"
-          
+
           echo "Build Metadata:"
           echo "  OS_GIT_VERSION: $OS_GIT_VERSION"
 
           export GOTOOLCHAIN=auto
 
           # Install goversioninfo (missing in EL9 repos but needed by oc)
-          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          go install \
+            github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
           export PATH=$PATH:$(go env GOPATH)/bin
 
-          # Install build dependencies if spec exists
-          if [ -n "$SPEC" ]; then
-            # Hack for oc: remove goversioninfo dependency if not in repo
-            if [ "$SPEC" == "oc.spec" ]; then
-              sed -i '/BuildRequires:.*goversioninfo/d' "$SPEC"
-            fi
-            dnf builddep -y "$SPEC"
+          # Install spec build dependencies
+          # Hack for oc: remove goversioninfo dependency if not in repo
+          if [ "$SPEC" == "oc.spec" ]; then
+            sed -i '/BuildRequires:.*goversioninfo/d' "$SPEC"
           fi
+          dnf builddep -y "$SPEC"
 
-          if [ -n "${{ matrix.component.build_script }}" ]; then
-            echo "Using explicit build script: ${{ matrix.component.build_script }}"
-            chmod +x "${{ matrix.component.build_script }}"
-            ./${{ matrix.component.build_script }}
-          elif [ -n "$SPEC" ]; then
-            echo "Building RPM from $SPEC..."
-            NAME=$(rpmspec -q --qf "%{name}\n" "$SPEC" | head -n 1)
-            VERSION_SPEC=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
-            SOURCE0=$(rpmspec -P "$SPEC" | sed -n 's/^Source0:[[:space:]]*//p' | head -n 1)
-            SOURCE_FILE="${SOURCE0##*/}"
-            if [ -z "$SOURCE_FILE" ] || [ "$SOURCE_FILE" == "(none)" ]; then
-              echo "Unable to determine source archive name from $SPEC."
-              exit 1
-            fi
-            mkdir -p _rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-            tar -czf "_rpmbuild/SOURCES/${SOURCE_FILE}" \
-              --exclude='./.git' \
-              --exclude='./_output' \
-              --exclude='./_rpmbuild' \
-              --transform="s|^.|$NAME-$VERSION_SPEC|" ./
-            rpmbuild -ba "$SPEC" \
-              --define "_topdir $PWD/_rpmbuild" \
-              --define "release 1" \
-              --define "commit $COMMIT" \
-              --define "os_git_vars OS_GIT_VERSION='$OS_GIT_VERSION' OS_GIT_COMMIT='$OS_GIT_COMMIT' OS_GIT_MAJOR='$OS_GIT_MAJOR' OS_GIT_MINOR='$OS_GIT_MINOR' OS_GIT_TREE_STATE='$OS_GIT_TREE_STATE'"
-          elif [ -f "Makefile" ] && make -n rpm >/dev/null 2>&1; then
-            echo "Makefile has rpm target, using make rpm..."
-            make rpm
-          else
-            echo "No build script, Makefile rpm target, or .spec file defined."
+          echo "Building RPM from $SPEC..."
+          NAME=$(rpmspec -q --qf "%{name}\n" "$SPEC" | head -n 1)
+          VERSION_SPEC=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
+          SOURCE0=$(
+            rpmspec -P "$SPEC" |
+              sed -n 's/^Source0:[[:space:]]*//p' |
+              head -n 1
+          )
+          SOURCE_FILE="${SOURCE0##*/}"
+          if [ -z "$SOURCE_FILE" ] || [ "$SOURCE_FILE" == "(none)" ]; then
+            echo "Unable to determine source archive name from $SPEC."
             exit 1
           fi
-          
+          mkdir -p _rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          tar -czf "_rpmbuild/SOURCES/${SOURCE_FILE}" \
+            --exclude='./.git' \
+            --exclude='./_output' \
+            --exclude='./_rpmbuild' \
+            --transform="s|^.|$NAME-$VERSION_SPEC|" ./
+          rpmbuild -ba "$SPEC" \
+            --define "_topdir $PWD/_rpmbuild" \
+            --define "release 1" \
+            --define "commit $COMMIT" \
+            --define "os_git_vars \
+              OS_GIT_VERSION='$OS_GIT_VERSION' \
+              OS_GIT_COMMIT='$OS_GIT_COMMIT' \
+              OS_GIT_MAJOR='$OS_GIT_MAJOR' \
+              OS_GIT_MINOR='$OS_GIT_MINOR' \
+              OS_GIT_TREE_STATE='$OS_GIT_TREE_STATE'"
+
       - name: Archive RPM Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -182,3 +165,118 @@ jobs:
             source/RPMS/
             source/_rpmbuild/RPMS/
           if-no-files-found: warn
+
+  build-rpms-cbs:
+    name: Build ${{ matrix.component.name }} with CBS (EL9)
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    container:
+      image: quay.io/centos/centos:stream9
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component:
+              name: cri-o
+              project: cri-o
+              ref: c9s-sig-cloud-okd-4.20
+          - component:
+              name: cri-tools
+              project: cri-tools
+              ref: c9s-sig-cloud-okd-4.20
+          - component:
+              name: conmon-rs
+              project: conmon-rs
+              ref: c9s-sig-cloud
+    steps:
+      - name: Install CBS client
+        run: |
+          dnf install -y epel-release
+          dnf makecache
+          dnf install -y git koji
+
+      - name: Configure CBS credentials
+        env:
+          CBS_CLIENT_CERT: ${{ secrets.CBS_CLIENT_CERT }}
+          CBS_SERVER_CA_CERT: ${{ secrets.CBS_SERVER_CA_CERT }}
+        run: |
+          if [ -z "$CBS_CLIENT_CERT" ] || [ -z "$CBS_SERVER_CA_CERT" ]; then
+            echo "Configure CBS certificate secrets before submitting builds."
+            echo "Required: CBS_CLIENT_CERT and CBS_SERVER_CA_CERT."
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$CBS_CLIENT_CERT" > "$HOME/.centos.cert"
+          printf '%s\n' "$CBS_SERVER_CA_CERT" > "$HOME/.centos-server-ca.cert"
+          cat > "$RUNNER_TEMP/cbs-koji.conf" <<EOF
+          [cbs]
+          server = https://cbs.centos.org/kojihub
+          weburl = https://cbs.centos.org/koji
+          topurl = https://cbs.centos.org/kojifiles
+          authtype = ssl
+          cert = $HOME/.centos.cert
+          serverca = $HOME/.centos-server-ca.cert
+          EOF
+
+      - name: Submit CBS scratch build
+        id: submit
+        env:
+          CBS_PROJECT: ${{ matrix.component.project }}
+          CBS_SOURCE_REF: ${{ matrix.component.ref }}
+          CBS_TARGET: cloud9s-okd-4.20-el9s
+        run: |
+          source_url="https://gitlab.com/CentOS/cloud/rpms/${CBS_PROJECT}.git"
+          source_commit=$(
+            git ls-remote "$source_url" "refs/heads/${CBS_SOURCE_REF}" |
+              awk 'NR == 1 { print $1 }'
+          )
+          if [ -z "$source_commit" ]; then
+            echo "Could not resolve ${source_url} branch ${CBS_SOURCE_REF}."
+            exit 1
+          fi
+          source_scm="git+${source_url}#${source_commit}"
+          build_output=$(
+            koji --config "$RUNNER_TEMP/cbs-koji.conf" --profile cbs \
+              build --scratch --nowait "$CBS_TARGET" "$source_scm" 2>&1
+          ) || {
+            printf '%s\n' "$build_output"
+            exit 1
+          }
+          printf '%s\n' "$build_output"
+          task_id=$(
+            sed -nE 's/.*Created task: ([0-9]+).*/\1/p' \
+              <<< "$build_output" | tail -n 1
+          )
+          if [ -z "$task_id" ]; then
+            echo "CBS did not return a task ID."
+            exit 1
+          fi
+          echo "task_id=$task_id" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for CBS build
+        env:
+          CBS_TASK_ID: ${{ steps.submit.outputs.task_id }}
+        run: |
+          koji --config "$RUNNER_TEMP/cbs-koji.conf" --profile cbs \
+            watch-task "$CBS_TASK_ID"
+
+      - name: Download CBS RPMs
+        env:
+          CBS_TASK_ID: ${{ steps.submit.outputs.task_id }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/cbs-rpms"
+          cd "$GITHUB_WORKSPACE/cbs-rpms"
+          koji --config "$RUNNER_TEMP/cbs-koji.conf" --profile cbs \
+            download-task "$CBS_TASK_ID"
+          if ! find . -type f -name '*.rpm' -print -quit | grep -q .; then
+            echo "CBS task ${CBS_TASK_ID} produced no RPM artifacts."
+            exit 1
+          fi
+
+      - name: Archive CBS RPM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.component.name }}-rpms-cbs-el9
+          path: cbs-rpms/**/*.rpm
+          if-no-files-found: error
