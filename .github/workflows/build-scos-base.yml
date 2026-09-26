@@ -2,8 +2,9 @@ name: Build and Publish SCOS Base
 
 on:
   push:
-    branches:
-      - main
+    paths:
+      - .github/workflows/build-scos-base.yml
+      - os/base/c9s/patches/**
   workflow_dispatch:
 
 permissions:
@@ -97,6 +98,7 @@ jobs:
             --env REGISTRY_AUTH_FILE=/run/ghcr-auth.json \
             --env IMAGE_REF="$image_ref" \
             --env IMMUTABLE_TAG="$immutable_tag" \
+            --env GITHUB_REF="$GITHUB_REF" \
             --entrypoint /bin/bash \
             quay.io/coreos-assembler/coreos-assembler:latest \
             -euo pipefail -c '
@@ -113,9 +115,11 @@ jobs:
               skopeo copy --dest-authfile "$REGISTRY_AUTH_FILE" \
                 "oci-archive:${archives[0]}" \
                 "docker://${IMAGE_REF}:${IMMUTABLE_TAG}"
-              skopeo copy --dest-authfile "$REGISTRY_AUTH_FILE" \
-                "oci-archive:${archives[0]}" \
-                "docker://${IMAGE_REF}:c9s"
+              if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+                skopeo copy --dest-authfile "$REGISTRY_AUTH_FILE" \
+                  "oci-archive:${archives[0]}" \
+                  "docker://${IMAGE_REF}:c9s"
+              fi
             '
 
       - name: Remove registry auth file
