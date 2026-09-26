@@ -216,7 +216,8 @@ jobs:
           source_url="https://gitlab.com/CentOS/cloud/rpms/${SIG_PROJECT}.git"
           git clone --depth 1 --single-branch \
             --branch "$SIG_SOURCE_REF" "$source_url" "$GITHUB_WORKSPACE/source"
-          echo "Using ${SIG_PROJECT} source commit $(git -C "$GITHUB_WORKSPACE/source" rev-parse HEAD)"
+          source_commit=$(git -C "$GITHUB_WORKSPACE/source" rev-parse HEAD)
+          echo "Using ${SIG_PROJECT} source commit ${source_commit}"
 
       - name: Download package sources
         run: |
@@ -248,7 +249,8 @@ jobs:
           rpmbuild -ba "$spec" \
             --define "_topdir $topdir" \
             --define "_sourcedir $topdir/SOURCES"
-          if ! find "$topdir/RPMS" -type f -name '*.rpm' -print -quit | grep -q .; then
+          if ! find "$topdir/RPMS" -type f -name '*.rpm' -print -quit \
+            | grep -q .; then
             echo "Local rpmbuild produced no RPM artifacts."
             exit 1
           fi
