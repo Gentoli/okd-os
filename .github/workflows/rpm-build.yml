@@ -129,10 +129,21 @@ jobs:
           dnf builddep -y "$SPEC"
 
           echo "Building RPM from $SPEC..."
-          NAME=$(rpmspec -q --qf "%{name}\n" "$SPEC" | head -n 1)
           VERSION_SPEC=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
+          if [ "${{ matrix.component.name }}" == "kubernetes" ]; then
+            VERSION_SPEC="$VERSION_RAW"
+          fi
+          NAME=$(
+            rpmspec --define "version $VERSION_SPEC" \
+              -q --qf "%{name}\n" "$SPEC" | head -n 1
+          )
+          VERSION_SPEC=$(
+            rpmspec --define "version $VERSION_SPEC" \
+              -q --qf "%{version}\n" "$SPEC" | head -n 1
+          )
+          echo "Building RPM ${NAME}-${VERSION_SPEC}"
           SOURCE0=$(
-            rpmspec -P "$SPEC" |
+            rpmspec --define "version $VERSION_SPEC" -P "$SPEC" |
               sed -n 's/^Source0:[[:space:]]*//p' |
               head -n 1
           )
@@ -149,6 +160,7 @@ jobs:
             --transform="s|^|$NAME-$VERSION_SPEC/|rSH" ./
           rpmbuild -ba "$SPEC" \
             --define "_topdir $PWD/_rpmbuild" \
+            --define "version $VERSION_SPEC" \
             --define "release 1" \
             --define "commit $COMMIT" \
             --define "os_git_vars \
