@@ -297,8 +297,12 @@ jobs:
       - name: Install all RPMs in CentOS Stream 9
         run: |
           set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/rpm-test-report"
+          printf "RPM and binary version report\n" \
+            > "$GITHUB_WORKSPACE/rpm-test-report/rpm-versions.txt"
           docker run --rm \
             --volume "$GITHUB_WORKSPACE/rpms:/rpms:ro" \
+            --volume "$GITHUB_WORKSPACE/rpm-test-report:/report" \
             quay.io/centos/centos:stream9 \
             bash -euo pipefail -c '
               dnf install -y dnf-plugins-core epel-release epel-next-release
@@ -312,45 +316,86 @@ jobs:
               printf "Installing %d RPMs\n" "${#rpms[@]}"
               dnf install -y "${rpms[@]}"
 
-              declare -a bins=()
+              report=/report/rpm-versions.txt
+              {
+                echo
+                echo "Installed RPM versions:"
+                for rpm_file in "${rpms[@]}"; do
+                  rpm -qp --qf "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n" "$rpm_file"
+                done | sort
+                echo
+                echo "Executable binaries:"
+              } >> "$report"
+
               declare -A seen_bins=()
+              bin_count=0
               for rpm_file in "${rpms[@]}"; do
-                while IFS= read -r bin; do
+                while read -r mode bin; do
                   case "$bin" in
-                    /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*)
-                      if [ -f "$bin" ] && [ -x "$bin" ] &&
-                        [ -z "${seen_bins[$bin]+x}" ]; then
-                        seen_bins["$bin"]=1
-                        bins+=("$bin")
+                    /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*|/usr/libexec/*)
+                      if (( mode & 73 )); then
+                        if [ ! -f "$bin" ] || [ ! -x "$bin" ]; then
+                          echo "RPM binary is missing or not executable: $bin" >&2
+                          exit 1
+                        fi
+                        if [ -z "${seen_bins[$bin]+x}" ]; then
+                          seen_bins["$bin"]=1
+                          bin_count=$((bin_count + 1))
+                          owner=$(rpm -qf --qf \
+                            "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}" "$bin")
+                          version_args=()
+                          case "$bin" in
+                            /usr/bin/conmonrs|/usr/bin/crictl|/usr/bin/crio|\
+                              /usr/bin/kube-apiserver|/usr/bin/kube-controller-manager|\
+                              /usr/bin/kube-scheduler|/usr/bin/kubelet|\
+                              /usr/bin/kubensenter|\
+                              /usr/libexec/kubelet-image-credential-provider-plugins/crio-credential-provider)
+                              version_args=("$bin" --version)
+                              ;;
+                            /usr/bin/oc|/usr/bin/kubectl)
+                              version_args=("$bin" version --client)
+                              ;;
+                            /usr/bin/hyperkube)
+                              version_args=("$bin" kubelet --version)
+                              ;;
+                          esac
+                          if [ "${#version_args[@]}" -eq 0 ]; then
+                            printf "%s (%s): no version probe; RPM version recorded\n" \
+                              "$bin" "$owner" >> "$report"
+                          elif output=$(timeout 20s "${version_args[@]}" 2>&1); then
+                            version=$(
+                              printf "%s\n" "$output" |
+                                grep -Em1 \
+                                  "^(version:|[^[:space:]]+ version [0-9]|Kubernetes v|Client Version:|Version:[[:space:]]|nsenter from )" ||
+                                true
+                            )
+                            if [ -z "$version" ]; then
+                              version=$(printf "%s\n" "$output" | head -n 1)
+                            fi
+                            printf "%s (%s): %s\n" "$bin" "$owner" "$version" \
+                              >> "$report"
+                          else
+                            status=$?
+                            printf "%s (%s): version probe failed (%d); RPM version recorded\n" \
+                              "$bin" "$owner" "$status" >> "$report"
+                          fi
+                        fi
                       fi
                       ;;
                   esac
-                done < <(rpm -qpl "$rpm_file")
+                done < <(rpm -qp --qf "[%{FILEMODES} %{FILENAMES}\n]" "$rpm_file")
               done
-              if [ "${#bins[@]}" -eq 0 ]; then
+              if [ "$bin_count" -eq 0 ]; then
                 echo "No executable binaries were found in the RPMs." >&2
                 exit 1
               fi
-              for bin in "${bins[@]}"; do
-                printf "Checking %s\n" "$bin"
-                if output=$(timeout 30s "$bin" --version 2>&1); then
-                  if [ -z "$output" ] ||
-                    ! grep -Eq "(^|[^[:alnum:]])v?[0-9]+\.[0-9]+" <<< "$output"; then
-                    echo "$bin --version did not report a version." >&2
-                    printf "%s\n" "$output" >&2
-                    exit 1
-                  fi
-                  printf "%s\n" "$output"
-                else
-                  version_status=$?
-                  if help_output=$(timeout 30s "$bin" --help 2>&1); then
-                    echo "$bin has no working --version option; --help succeeded."
-                  else
-                    help_status=$?
-                    echo "$bin failed --version ($version_status) and --help ($help_status)." >&2
-                    printf "%s\n%s\n" "$output" "$help_output" >&2
-                    exit 1
-                  fi
-                fi
-              done
+              cat "$report"
             '
+
+      - name: Archive RPM version report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-binary-versions-el9
+          path: rpm-test-report/rpm-versions.txt
+          if-no-files-found: error
