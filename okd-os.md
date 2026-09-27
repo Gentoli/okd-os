@@ -130,6 +130,65 @@ definitions, network access, and any credentials/CA certificates those
 repositories require. No conclusion about a fully provisioned internal build
 is implied by this failed attempt.
 
+## Using RPM Actions artifacts as a local repo
+
+The successful [RPM workflow run 36280633883](https://github.com/Gentoli/okd-os/actions/runs/36280633883)
+uploaded six RPM ZIP artifacts: the CentOS SIG builds for `cri-o`,
+`cri-tools`, and `conmon-rs`, and the `oc`, `kubernetes`, and
+`crio-credential-provider` EL9 builds. Unpacking them produced 15 RPM files
+(including debuginfo/debugsource RPMs). The artifacts are GitHub Actions
+downloads, not DNF repositories: download and unpack them, then generate
+`repodata` with `createrepo_c`.
+
+A web host is not required for a one-off/local compose. I verified a local
+repository by binding its directory into the build container and using a repo
+file with `baseurl=file:///var/tmp/okd-rpm-repo`:
+
+```sh
+createrepo_c /path/to/rpms
+cat > all.repo <<'EOF'
+[rhel-9.8-server-ose-4.22]
+name=Local OpenShift RPM artifacts
+baseurl=file:///var/tmp/okd-rpm-repo
+enabled=1
+gpgcheck=0
+EOF
+podman build . \
+  --from ghcr.io/gentoli/okd-os-scos-base:c9s \
+  --secret id=yumrepos,src=all.repo \
+  --volume /path/to/rpms:/var/tmp/okd-rpm-repo:ro \
+  --security-opt label=disable \
+  -t localhost/stream-coreos:4.22
+```
+
+In this setup `rpm-ostree`/DNF successfully loaded the local repo metadata
+alongside the CentOS repos. The retry got past the previous unknown-repo
+failure, but composition still failed because four package names requested by
+the pinned manifest are absent from the artifacts:
+
+```text
+No match for argument: ose-aws-ecr-image-credential-provider
+No match for argument: ose-azure-acr-image-credential-provider
+No match for argument: ose-crio-credential-provider
+No match for argument: ose-gcp-gcr-image-credential-provider
+```
+
+The run contains `crio-credential-provider`, but its RPM metadata does not
+provide the requested `ose-crio-credential-provider` name. It has none of the
+other three `ose-*` provider RPMs either. Thus, the artifact set proves the
+local-repo method works, but is incomplete for this pinned compose; hosting
+these same artifacts would not fix the missing packages. The complete matching
+RPM set must first be produced or obtained.
+
+For recurring builds, keep artifact download, repo creation, and compose in the
+same workflow run (or explicitly download those artifacts into the build job).
+Actions artifacts expire (this run's bundles were set to expire after 90 days)
+and are not stable repo URLs. A persistent HTTPS RPM host is useful when builds
+must consume the same immutable package set independently of a particular
+workflow run; publish the RPMs and `repodata` together, retain old versions, and
+apply access control/signing appropriate to the packages. Do not point DNF at
+the temporary artifact-download URL or at the ZIP itself.
+
 ## CI context and source links
 
 At the pinned commit, [`openshift/release`'s 4.22 config](https://github.com/openshift/release/blob/06c6fdbe105cccc2e7a06d4dd23cae71b8caaeda/ci-operator/config/openshift/os/openshift-os-release-4.22.yaml)
