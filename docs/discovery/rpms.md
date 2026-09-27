@@ -32,6 +32,43 @@ No component RPM build config was found for `containers/conmon-rs` in `openshift
 
 The upstream [repository includes `crio-credential-provider.spec`](https://github.com/openshift/crio-credential-provider/blob/83d4961cee137f764e5ef11b7b4301e0496dfa89/crio-credential-provider.spec), which describes building and installing the Go binary. No corresponding RPM build entry was found in the current OpenShift ci-operator configuration, and no credential-provider RPM appears in the linked CentOS OKD 4.17 package/SRPM listing. The GitHub Actions matrix builds this upstream spec directly.
 
+## ART sources for the OpenShift OS credential-provider packages
+
+The pinned [`openshift/os` 4.22 manifest](https://github.com/openshift/os/blob/3d00d375d491de94fd9dcd0b5440a0efbec3d9db/packages-openshift.yaml) asks DNF for four `ose-*` package capabilities. Their public ART package metadata is in [`openshift-eng/ocp-build-data` at commit `874d1e3517e6eac0666c5fcf5dcfe7b96c769589`](https://github.com/openshift-eng/ocp-build-data/tree/874d1e3517e6eac0666c5fcf5dcfe7b96c769589/rpms). The configs select the `release-{MAJOR}.{MINOR}` source branch and RHAOS candidate targets, including `rhaos-4.22-rhel-9-candidate`.
+
+| Manifest capability | ART source/spec | RPM identity in the public spec |
+| --- | --- | --- |
+| `ose-aws-ecr-image-credential-provider` | [`ose-aws…yml`](https://github.com/openshift-eng/ocp-build-data/blob/874d1e3517e6eac0666c5fcf5dcfe7b96c769589/rpms/ose-aws-ecr-image-credential-provider.yml#L2-L19) points to `openshift/cloud-provider-aws`, `ecr-credential-provider.spec`. | [`ecr-credential-provider.spec`](https://github.com/openshift/cloud-provider-aws/blob/release-4.22/ecr-credential-provider.spec#L48-L60) names the RPM `ecr-credential-provider` and explicitly provides `ose-aws-ecr-image-credential-provider`. |
+| `ose-azure-acr-image-credential-provider` | [`ose-azure…yml`](https://github.com/openshift-eng/ocp-build-data/blob/874d1e3517e6eac0666c5fcf5dcfe7b96c769589/rpms/ose-azure-acr-image-credential-provider.yml#L2-L19) points to `openshift/cloud-provider-azure`, `acr-credential-provider.spec`. | [`acr-credential-provider.spec`](https://github.com/openshift/cloud-provider-azure/blob/release-4.22/acr-credential-provider.spec#L48-L60) names the RPM `acr-credential-provider` and explicitly provides `ose-azure-acr-image-credential-provider`. |
+| `ose-gcp-gcr-image-credential-provider` | [`ose-gcp…yml`](https://github.com/openshift-eng/ocp-build-data/blob/874d1e3517e6eac0666c5fcf5dcfe7b96c769589/rpms/ose-gcp-gcr-image-credential-provider.yml#L2-L19) points to `openshift/cloud-provider-gcp`, `gcr-credential-provider.spec`. | [`gcr-credential-provider.spec`](https://github.com/openshift/cloud-provider-gcp/blob/release-4.22/gcr-credential-provider.spec#L48-L60) names the RPM `gcr-credential-provider` and explicitly provides `ose-gcp-gcr-image-credential-provider`. |
+| `ose-crio-credential-provider` | [`ose-crio…yml`](https://github.com/openshift-eng/ocp-build-data/blob/874d1e3517e6eac0666c5fcf5dcfe7b96c769589/rpms/ose-crio-credential-provider.yml#L2-L20) points to `openshift/crio-credential-provider`, `crio-credential-provider.spec`. | The [4.22 spec](https://github.com/openshift/crio-credential-provider/blob/release-4.22/crio-credential-provider.spec#L14-L23) names the RPM `crio-credential-provider` but does not declare `Provides: ose-crio-credential-provider`. This does not explain how the ART build satisfies the manifest capability. |
+
+The ART metadata's `ose-*` component names are therefore not necessarily the RPM `Name:`. For AWS, Azure, and GCP the specs explicitly bridge the names with `Provides:`. For CRI-O, the public source spec does not show the corresponding alias; the `crio-credential-provider` RPM from this repository's workflow also did not provide that capability. I did not find a public source/spec detail that explains how the RHAOS candidate repo makes this last capability available.
+
+### Related OpenShift release CI builds
+
+The public [release-4.22 AWS](https://github.com/openshift/release/blob/16117d719334e8739274ad4125f783e25b0b1e0e/ci-operator/config/openshift/cloud-provider-aws/openshift-cloud-provider-aws-release-4.22.yaml#L39-L45), [Azure](https://github.com/openshift/release/blob/16117d719334e8739274ad4125f783e25b0b1e0e/ci-operator/config/openshift/cloud-provider-azure/openshift-cloud-provider-azure-release-4.22.yaml#L38-L44), and [GCP](https://github.com/openshift/release/blob/16117d719334e8739274ad4125f783e25b0b1e0e/ci-operator/config/openshift/cloud-provider-gcp/openshift-cloud-provider-gcp-release-4.22.yaml#L36-L42) ci-operator configs build RPMs from those cloud-provider repositories. Their test image definitions download the unprefixed names (`ecr-credential-provider`, `acr-credential-provider`, `gcr-credential-provider`) from the CI `built` repo, and the configs publish `cloud-provider-*-rpms` additional images. These are useful public source/build references, but are separate CI artifacts, not proof that the exact `ose-*` RHAOS candidate RPMs were produced by those jobs.
+
+The checked `openshift/release` `ci-operator/config/openshift/crio-credential-provider/` directory contains only an `OWNERS` file, not a comparable release-4.22 RPM build config. The upstream CRI-O credential-provider source does have a spec and its own RPM workflow; that output has the unprefixed RPM identity noted above.
+
+## Follow-up node-image build with unavailable packages omitted
+
+I downloaded the six RPM artifact bundles from [workflow run 36280633883](https://github.com/Gentoli/okd-os/actions/runs/36280633883), unpacked 15 RPMs, generated local repo metadata with `createrepo_c`, and used a read-only `file://` repository in the pinned `openshift/os` build. In a temporary source checkout only, I removed all four unavailable `ose-*` provider entries from `packages-openshift.yaml` and retried the build.
+
+The compose then completed successfully and tagged
+`localhost/okd-stream-coreos:4.22-skip-credential-providers` (image ID
+`d581751baef374e229543169cfb4c19cddaa2cd2e0787494591852c33afd20e4`). The
+resulting image contains the other requested packages, including `cri-o`,
+`cri-tools`, `conmon-rs`, `openshift-clients`, `openshift-kubelet`, and
+`openvswitch3.5`. This confirms no further fatal compose error after skipping
+the four providers; it is not a complete OKD node image because those
+credentials-provider entries were omitted.
+
+The build exited successfully but emitted non-fatal cleanup warnings because
+the postprocess script tried to remove files underneath the read-only
+`/var/tmp/okd-rpm-repo` bind mount while clearing `/var`. No RPM repo or mount
+was added to the resulting image.
+
 ## CentOS Stream 9 Cloud SIG repository for OKD 4.17
 
 The [CentOS buildlogs listing](https://buildlogs.centos.org/centos/9-stream/cloud/aarch64/okd-4.17/Packages/c/) contains `cri-o-1.30.6-1.el9s`, `cri-tools-1.30.1-1.el9s`, and `conmon-rs-0.5.1-1.el9s` for aarch64. Matching source RPMs are listed in the [OKD 4.17 source repository](https://mirror.stream.centos.org/SIGs/9-stream/cloud/source/okd-4.17/Packages/c/). The buildlogs page warns it contains a mix of raw/unsigned artifacts for testing; the corresponding published repository is under [CentOS Stream 9 Cloud SIG](https://mirror.stream.centos.org/SIGs/9-stream/cloud/aarch64/okd-4.17/).
