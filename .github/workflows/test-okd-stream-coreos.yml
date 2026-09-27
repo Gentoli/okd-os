@@ -10,22 +10,33 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      image_run_id:
-        description: Successful Build and Publish OKD Stream CoreOS run ID
+      scos_run_id:
+        description: Successful Build and Publish SCOS Base run ID with QEMU artifact
         required: true
+        type: string
+      oci_image_ref:
+        description: Full GHCR OCI image pullspec (tag or digest)
+        required: true
+        default: ghcr.io/gentoli/okd-stream-coreos:latest
+        type: string
+      upstream_image_ref:
+        description: Full upstream SCOS image pullspec for comparison
+        required: true
+        default: quay.io/okd/centos-stream-coreos-9:4.18-x86_64
         type: string
 
 env:
-  COREOS_CONFIG_REF: fd27dd732172d0cefca97b283252b1f31c9d7f21
-  COREOS_CONFIG_PATH: os/base/c9s/source
+  DEFAULT_OKD_IMAGE_REF: ghcr.io/gentoli/okd-stream-coreos:latest
+  DEFAULT_UPSTREAM_IMAGE_REF: quay.io/okd/centos-stream-coreos-9:4.18-x86_64
   OPENSHIFT_OS_REF: 3d00d375d491de94fd9dcd0b5440a0efbec3d9db
 
 permissions:
   actions: read
   contents: read
+  packages: read
 
 concurrency:
-  group: test-okd-stream-coreos-${{ github.event.workflow_run.id || inputs.image_run_id }}
+  group: test-okd-stream-coreos-${{ github.event.workflow_run.id || inputs.oci_image_ref }}
   cancel-in-progress: false
 
 jobs:
@@ -68,77 +79,83 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Select image build run
-        id: image-run
+      - name: Select image references and SCOS base run
+        id: test-inputs
         env:
-          INPUT_IMAGE_RUN_ID: ${{ inputs.image_run_id }}
+          INPUT_SCOS_RUN_ID: ${{ inputs.scos_run_id }}
+          INPUT_OKD_IMAGE_REF: ${{ inputs.oci_image_ref }}
+          INPUT_UPSTREAM_IMAGE_REF: ${{ inputs.upstream_image_ref }}
+          CONFIGURED_SCOS_RUN_ID: ${{ vars.OKD_SCOS_BASE_RUN_ID }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
-            image_run_id=$(jq -r '.workflow_run.id' "$GITHUB_EVENT_PATH")
+            scos_run_id="$CONFIGURED_SCOS_RUN_ID"
+            oci_image_ref="$DEFAULT_OKD_IMAGE_REF"
+            upstream_image_ref="$DEFAULT_UPSTREAM_IMAGE_REF"
           else
-            image_run_id="$INPUT_IMAGE_RUN_ID"
+            scos_run_id="$INPUT_SCOS_RUN_ID"
+            oci_image_ref="$INPUT_OKD_IMAGE_REF"
+            upstream_image_ref="$INPUT_UPSTREAM_IMAGE_REF"
           fi
 
-          if [[ ! "$image_run_id" =~ ^[0-9]{1,20}$ ]]; then
-            echo "image_run_id must be a numeric workflow run ID." >&2
+          if [[ ! "$scos_run_id" =~ ^[0-9]{1,20}$ ]]; then
+            echo "Set scos_run_id or the OKD_SCOS_BASE_RUN_ID repository variable" \
+              "to a successful SCOS base workflow run ID." >&2
             exit 1
           fi
-          echo "run_id=$image_run_id" >> "$GITHUB_OUTPUT"
+          if [[ -z "$oci_image_ref" || -z "$upstream_image_ref" ]]; then
+            echo "Both OCI image references must be set." >&2
+            exit 1
+          fi
+          echo "oci_image_ref=$oci_image_ref" >> "$GITHUB_OUTPUT"
+          echo "upstream_image_ref=$upstream_image_ref" >> "$GITHUB_OUTPUT"
+          echo "scos_run_id=$scos_run_id" >> "$GITHUB_OUTPUT"
 
-      - name: Download exact OCI image artifact
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Pull OCI images from registries
+        env:
+          OKD_IMAGE_REF: ${{ steps.test-inputs.outputs.oci_image_ref }}
+          UPSTREAM_IMAGE_REF: ${{ steps.test-inputs.outputs.upstream_image_ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/okd-image" "$RUNNER_TEMP/upstream-image"
+          for image in \
+            "okd|$OKD_IMAGE_REF|$RUNNER_TEMP/okd-image/okd.ociarchive" \
+            "upstream|$UPSTREAM_IMAGE_REF|$RUNNER_TEMP/upstream-image/upstream.ociarchive"; do
+            IFS='|' read -r label image_ref archive <<< "$image"
+            if [[ "$image_ref" == *" "* || "$image_ref" == docker://* ]]; then
+              echo "Provide a full image pullspec without the docker:// prefix." >&2
+              exit 1
+            fi
+            skopeo copy --override-arch amd64 \
+              "docker://${image_ref}" "oci-archive:${archive}"
+            image_info=$(skopeo inspect "oci-archive:${archive}")
+            image_arch=$(jq -r '.Architecture' <<< "$image_info")
+            image_digest=$(jq -r '.Digest' <<< "$image_info")
+            image_version=$(jq -r '.Labels["org.opencontainers.image.version"] // "unknown"' <<< "$image_info")
+            if [[ "$image_arch" != "amd64" ]]; then
+              echo "Expected an amd64 $label image, got: $image_arch" >&2
+              exit 1
+            fi
+            echo "$label image: $image_ref ($image_digest, version $image_version)"
+            sha256sum "$archive"
+          done
+
+      - name: Download SCOS QEMU base artifact
         uses: actions/download-artifact@v4.1.3
         with:
-          name: okd-stream-coreos-${{ steps.image-run.outputs.run_id }}
-          path: ${{ runner.temp }}/okd-image
+          name: scos-c9s-qemu-${{ steps.test-inputs.outputs.scos_run_id }}
+          path: ${{ runner.temp }}/scos-qemu
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
-          run-id: ${{ steps.image-run.outputs.run_id }}
-
-      - name: Validate OCI image artifact
-        env:
-          OCI_ARCHIVE: ${{ runner.temp }}/okd-image/okd-stream-coreos.ociarchive
-        run: |
-          set -euo pipefail
-          source_archive="$RUNNER_TEMP/okd-image/okd-stream-coreos.oci.tar"
-          if [[ ! -s "$source_archive" ]]; then
-            echo "The selected image run did not provide its OCI archive." >&2
-            exit 1
-          fi
-          mv "$source_archive" "$OCI_ARCHIVE"
-
-          image_info=$(skopeo inspect "oci-archive:$OCI_ARCHIVE")
-          image_arch=$(jq -r '.Architecture' <<< "$image_info")
-          image_version=$(jq -r '.Labels["org.opencontainers.image.version"] // empty' <<< "$image_info")
-          if [[ "$image_arch" != "amd64" ]]; then
-            echo "Expected an amd64 image, got: $image_arch" >&2
-            exit 1
-          fi
-          if [[ -z "$image_version" ]]; then
-            echo "The OCI archive is missing org.opencontainers.image.version." >&2
-            exit 1
-          fi
-
-          echo "Testing OKD image version: $image_version"
-          sha256sum "$OCI_ARCHIVE"
-
-      - name: Checkout pinned CoreOS config
-        uses: actions/checkout@v4
-        with:
-          repository: coreos/rhel-coreos-config
-          ref: ${{ env.COREOS_CONFIG_REF }}
-          path: ${{ env.COREOS_CONFIG_PATH }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Apply local c9s patch
-        working-directory: ${{ env.COREOS_CONFIG_PATH }}
-        run: |
-          set -euo pipefail
-          patch="$GITHUB_WORKSPACE/os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch"
-          git apply --check "$patch"
-          git apply "$patch"
-          git diff --check
+          run-id: ${{ steps.test-inputs.outputs.scos_run_id }}
 
       - name: Checkout pinned openshift/os Kola tests
         uses: actions/checkout@v4
@@ -148,21 +165,20 @@ jobs:
           path: openshift-os
           persist-credentials: false
 
-      - name: Build SCOS QEMU base
+      - name: Validate SCOS QEMU artifact
         run: |
           set -euo pipefail
-          build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
-          mkdir -p "$build_dir"
-          chown builder:builder "$build_dir"
-          runuser -u builder -- env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
-            COREOS_CONFIG_PATH="$COREOS_CONFIG_PATH" \
-            /bin/bash -euo pipefail -c '
-              cd "$GITHUB_WORKSPACE/os/base/c9s/build"
-              coreos-assembler init --variant c9s \
-                "$GITHUB_WORKSPACE/$COREOS_CONFIG_PATH"
-              coreos-assembler build
-              coreos-assembler osbuild qemu
-            '
+          mapfile -t images < <(
+            find "$RUNNER_TEMP/scos-qemu" -maxdepth 1 -type f \
+              -name "scos-*-qemu.x86_64.qcow2" -print
+          )
+          if (( ${#images[@]} != 1 )); then
+            echo "Expected one x86_64 SCOS QEMU artifact," \
+              "found ${#images[@]}." >&2
+            exit 1
+          fi
+          chown builder:builder "${images[0]}"
+          echo "QEMU_IMAGE=${images[0]}" >> "$GITHUB_ENV"
 
       - name: Disable Zincati for the Kola pivot
         run: |
@@ -174,32 +190,49 @@ jobs:
       - name: Run openshift-tagged Kola tests against the pivoted image
         run: |
           set -euo pipefail
-          build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
+          build_dir="$RUNNER_TEMP/kola-workdir"
+          mkdir -p "$build_dir/tmp"
+          chown builder:builder "$build_dir"
           results_dir="$build_dir/tmp/kola-${GITHUB_RUN_ID}"
           if [[ -e "$results_dir" ]]; then
             echo "Kola output directory already exists: $results_dir" >&2
             exit 1
           fi
-          runuser -u builder -- env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
-            RUNNER_TEMP="$RUNNER_TEMP" \
-            KOLA_OUTPUT_DIR="$results_dir" \
-            /bin/bash -euo pipefail -c '
-              cd "$GITHUB_WORKSPACE/os/base/c9s/build"
-              coreos-assembler kola --build latest \
-                --output-dir "$KOLA_OUTPUT_DIR" \
-                run --platform qemu --distro scos --tag openshift \
-                --denylist-stream 4.22-c9s \
-                --denylist-test ext.openshift-os.version.rhaos-pkgs-match-openshift \
-                --oscontainer "$RUNNER_TEMP/okd-image/okd-stream-coreos.ociarchive" \
-                --append-ignition "$RUNNER_TEMP/disable-zincati.ign" \
-                --exttest "$GITHUB_WORKSPACE/openshift-os"
-            '
+          test_status=0
+          for image in \
+            "okd|$RUNNER_TEMP/okd-image/okd.ociarchive" \
+            "upstream|$RUNNER_TEMP/upstream-image/upstream.ociarchive"; do
+            IFS='|' read -r label archive <<< "$image"
+            image_results_dir="$build_dir/tmp/kola-${GITHUB_RUN_ID}-${label}"
+            if ! runuser -u builder -- env \
+              GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+              RUNNER_TEMP="$RUNNER_TEMP" \
+              QEMU_IMAGE="$QEMU_IMAGE" \
+              KOLA_OUTPUT_DIR="$image_results_dir" \
+              OCI_ARCHIVE="$archive" \
+              /bin/bash -euo pipefail -c '
+                kola \
+                  --qemu-image "$QEMU_IMAGE" \
+                  --output-dir "$KOLA_OUTPUT_DIR" \
+                  --platform qemu --distro scos --tag openshift \
+                  --denylist-stream 4.22-c9s \
+                  --denylist-test ext.openshift-os.version.rhaos-pkgs-match-openshift \
+                  --oscontainer "$OCI_ARCHIVE" \
+                  --append-ignition "$RUNNER_TEMP/disable-zincati.ign" \
+                  --exttest "$GITHUB_WORKSPACE/openshift-os" \
+                  run
+              '; then
+              echo "::error::Kola tests failed for the $label image."
+              test_status=1
+            fi
+          done
+          exit "$test_status"
 
       - name: Upload Kola results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: okd-kola-results-${{ steps.image-run.outputs.run_id }}
-          path: ${{ github.workspace }}/os/base/c9s/build/tmp/kola-${{ github.run_id }}/
+          name: okd-kola-results-${{ github.run_id }}
+          path: ${{ runner.temp }}/kola-workdir/tmp/kola-${{ github.run_id }}-*/
           if-no-files-found: warn
           retention-days: 14
