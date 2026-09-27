@@ -2,8 +2,8 @@ name: RPM Build Reproduction
 
 on:
   push:
-    branches:
-      - main
+    paths:
+      - .github/workflows/rpm-build.yml
   workflow_dispatch:
 
 permissions:
@@ -28,8 +28,20 @@ jobs:
             spec_file: oc.spec
           - name: crio-credential-provider
             repository: openshift/crio-credential-provider
-            ref: main
+            ref: release-4.22
             spec_file: crio-credential-provider.spec
+          - name: ecr-credential-provider
+            repository: openshift/cloud-provider-aws
+            ref: release-4.22
+            spec_file: ecr-credential-provider.spec
+          - name: acr-credential-provider
+            repository: openshift/cloud-provider-azure
+            ref: release-4.22
+            spec_file: acr-credential-provider.spec
+          - name: gcr-credential-provider
+            repository: openshift/cloud-provider-gcp
+            ref: release-4.22
+            spec_file: gcr-credential-provider.spec
     container:
       image: quay.io/centos/centos:stream${{ matrix.os_version }}
     steps:
@@ -98,6 +110,14 @@ jobs:
           if [ -z "$SPEC" ] || [ ! -f "$SPEC" ]; then
             echo "A valid RPM spec_file is required for this build job."
             exit 1
+          fi
+
+          if [ "$SPEC" == "crio-credential-provider.spec" ]; then
+            # The 4.22 OS manifest requests this capability.
+            # The upstream spec only declares the unprefixed RPM name.
+            provides="Provides: ose-crio-credential-provider"
+            provides+=" = %{version}-%{release}"
+            sed -i "/^Name:/a $provides" "$SPEC"
           fi
 
           VERSION="v${VERSION_RAW}"
@@ -310,6 +330,16 @@ jobs:
             exit 1
           fi
           dnf install -y "${rpms[@]}"
+          for capability in \
+            ose-aws-ecr-image-credential-provider \
+            ose-azure-acr-image-credential-provider \
+            ose-gcp-gcr-image-credential-provider \
+            ose-crio-credential-provider; do
+            if ! rpm -q --whatprovides "$capability" >/dev/null; then
+              echo "No installed RPM provides $capability." >&2
+              exit 1
+            fi
+          done
         shell: bash
 
       - name: Check binaries and record full version output
