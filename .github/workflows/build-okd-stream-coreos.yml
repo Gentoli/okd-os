@@ -3,7 +3,6 @@ name: Build and Publish OKD Stream CoreOS
 on:
   push:
     paths:
-      - .github/workflows/rpm-build.yml
       - .github/workflows/build-okd-stream-coreos.yml
   workflow_dispatch:
     inputs:
@@ -88,30 +87,22 @@ jobs:
           fi
 
           endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/rpm-build.yml/runs"
-          for attempt in $(seq 1 240); do
-            runs=$(gh api "$endpoint" -f "head_sha=$GITHUB_SHA" -f per_page=20)
-            run=$(jq -c --arg sha "$GITHUB_SHA" \
-              '[.workflow_runs[] | select(.head_sha == $sha)] |
+          for branch in "$GITHUB_REF_NAME" main; do
+            runs=$(gh api "$endpoint" -f "branch=$branch" -f per_page=20)
+            run=$(jq -c \
+              '[.workflow_runs[] | select(
+                .status == "completed" and .conclusion == "success"
+              )] |
                sort_by(.run_number) | last // empty' <<< "$runs")
             if [[ -n "$run" ]]; then
-              status=$(jq -r '.status' <<< "$run")
-              if [[ "$status" == "completed" ]]; then
-                if [[ "$(jq -r '.conclusion' <<< "$run")" != "success" ]]; then
-                  echo "The RPM workflow for this push did not succeed." >&2
-                  exit 1
-                fi
-                run_id=$(jq -r '.id' <<< "$run")
-                echo "Using successful RPM workflow run $run_id."
-                echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
-              echo "Waiting for RPM workflow run $(jq -r '.id' <<< "$run")."
-            else
-              echo "Waiting for the RPM workflow run for $GITHUB_SHA."
+              run_id=$(jq -r '.id' <<< "$run")
+              echo "Using successful RPM workflow run $run_id from $branch."
+              echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
-            sleep 60
           done
-          echo "Timed out waiting for the matching RPM workflow run." >&2
+          echo "No successful RPM workflow run exists on this branch or main." \
+            >&2
           exit 1
 
       - name: Install Podman and RPM repository tools
