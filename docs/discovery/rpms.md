@@ -53,7 +53,9 @@ The checked `openshift/release` `ci-operator/config/openshift/crio-credential-pr
 
 ### Verification of workflow run 36284192082
 
-All ten jobs in [RPM Build Reproduction run 36284192082](https://github.com/Gentoli/okd-os/actions/runs/36284192082) completed successfully, including the four provider RPM builds and the EL9 integration test. The generated artifacts include `ecr-credential-provider-0.0.1-1.el9`, `acr-credential-provider-0.0.1-1.el9`, `gcr-credential-provider-0.0.1-1.el9`, and `crio-credential-provider-0.1.2-1.el9`. The integration test installed the artifact set, checked all four requested `ose-*` capabilities with `rpm --whatprovides`, and verified the provider executables; the test job succeeded.
+All ten jobs in [RPM Build Reproduction run 36284192082](https://github.com/Gentoli/okd-os/actions/runs/36284192082) completed successfully, including the four provider RPM builds and the EL9 integration test. The generated artifacts include `ecr-credential-provider-0.0.1-1.el9`, `acr-credential-provider-0.0.1-1.el9`, `gcr-credential-provider-0.0.1-1.el9`, and `crio-credential-provider-0.1.2-1.el9`. Those unprefixed RPM names are intentional: their package metadata provides the four requested `ose-*` capabilities. The integration test installed the artifact set, checked all four capabilities with `rpm --whatprovides`, and verified the provider executables; the test job succeeded.
+
+The subsequent node-image [run 36286124279](https://github.com/Gentoli/okd-os/actions/runs/36286124279) downloaded these artifacts and generated the local repository successfully, but composition failed with DNF saying each `ose-*` package match was filtered out. The cause was the pinned `openshift/os` script's `includepkgs` whitelist: it admitted only package names beginning with `ose-aws-ecr-`, `ose-azure-acr-`, `ose-gcp-gcr-`, and `ose-crio-`, not the actual unprefixed RPM `Name:` values. The node-image workflow now extends that whitelist in its temporary source checkout to include the four actual RPM names. It does not rename the RPMs or alter the upstream manifest requests.
 
 ## Follow-up node-image build with unavailable packages omitted
 

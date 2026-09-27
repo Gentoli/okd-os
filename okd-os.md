@@ -209,6 +209,15 @@ not overwrite it. Every build also pushes a run-specific tag to
 `ghcr.io/gentoli/okd-stream-coreos` and uploads an OCI archive as a 14-day
 workflow artifact.
 
+The provider RPMs are correctly named `ecr-credential-provider`,
+`acr-credential-provider`, `gcr-credential-provider`, and
+`crio-credential-provider`; their RPM metadata provides the `ose-*` names
+requested by the OS manifest. The pinned upstream compose script's repository
+allowlist originally excluded these actual package names, so DNF filtered the
+provider capabilities out. The workflow extends that allowlist in its
+temporary `openshift/os` checkout before composing; it leaves the RPM names and
+manifest unchanged.
+
 ## CI context and source links
 
 At the pinned commit, [`openshift/release`'s 4.22 config](https://github.com/openshift/release/blob/06c6fdbe105cccc2e7a06d4dd23cae71b8caaeda/ci-operator/config/openshift/os/openshift-os-release-4.22.yaml)
