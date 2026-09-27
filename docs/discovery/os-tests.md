@@ -56,6 +56,23 @@ manual-dispatch window. The existing
 is useful coverage for RPM artifacts, but it does not boot the composed node
 image.
 
+### Local Kola validation
+
+On 2026-09-27, Kola pivoted the published image
+(`sha256:c591da8f18a0247fdc856b8cbbfb4a4bfa85df8ab40635b4093be2ece85387a0`)
+from a QEMU base built with the pinned c9s config. The Open vSwitch hugetlbfs
+assertion and `rhcos.network.init-interfaces-test` passed after the reboot.
+`crio.base` failed: CRI-O exited with `invalid plugin_dirs entry: mkdir
+/opt/cni: file exists`, so the CRI socket was absent and kubelet could not
+start. The workflow intentionally keeps that upstream Kola test enabled; this
+current image should not be considered smoke-clean until the CRI-O startup
+failure is understood.
+
+An initial trial using a Fedora CoreOS QEMU disk instead of the matching SCOS
+base staged the pivot but failed OSTree staged-deployment finalization while
+loading the SCOS SELinux policy. The test therefore builds the c9s QEMU base
+rather than using an unrelated generic CoreOS disk.
+
 ## Existing upstream Kola tests
 
 The current [`openshift/os` Kola test tree](https://github.com/openshift/os/tree/master/tests/kola)

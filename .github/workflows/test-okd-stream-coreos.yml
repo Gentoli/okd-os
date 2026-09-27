@@ -175,15 +175,18 @@ jobs:
         run: |
           set -euo pipefail
           build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
-          results_dir="$GITHUB_WORKSPACE/kola-results"
-          mkdir -p "$results_dir"
-          chown builder:builder "$results_dir"
+          results_dir="$build_dir/tmp/kola-${GITHUB_RUN_ID}"
+          if [[ -e "$results_dir" ]]; then
+            echo "Kola output directory already exists: $results_dir" >&2
+            exit 1
+          fi
           runuser -u builder -- env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
             RUNNER_TEMP="$RUNNER_TEMP" \
+            KOLA_OUTPUT_DIR="$results_dir" \
             /bin/bash -euo pipefail -c '
               cd "$GITHUB_WORKSPACE/os/base/c9s/build"
               coreos-assembler kola --build latest \
-                --output-dir "$GITHUB_WORKSPACE/kola-results" \
+                --output-dir "$KOLA_OUTPUT_DIR" \
                 run --platform qemu --distro scos --tag openshift \
                 --denylist-stream 4.22-c9s \
                 --denylist-test ext.openshift-os.version.rhaos-pkgs-match-openshift \
@@ -197,6 +200,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: okd-kola-results-${{ steps.image-run.outputs.run_id }}
-          path: ${{ github.workspace }}/kola-results/
+          path: ${{ github.workspace }}/os/base/c9s/build/tmp/kola-${{ github.run_id }}/
           if-no-files-found: warn
           retention-days: 14
