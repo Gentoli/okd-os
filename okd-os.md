@@ -17,11 +17,11 @@ workflows follow those requirements. The matching
 [`openshift/release` 4.20 config](https://github.com/openshift/release/blob/main/ci-operator/config/openshift/os/openshift-os-release-4.20.yaml)
 maps its RHEL 9.6 base input to the same `c9s-coreos` alias.
 
-There is no public `4.20` tag in `quay.io/okd/centos-stream-coreos-9`; its
-latest published release image is `419.9.202503111432-0-x86_64`, which the Kola
-workflow uses as the upstream comparison. The `4.22` compose investigation and
-run results below are retained as historical findings, not current workflow
-configuration.
+There is no public `4.20` tag in `quay.io/okd/centos-stream-coreos-9`. The Kola
+workflow instead resolves the upstream `stream-coreos` image from a pinned
+`quay.io/okd/scos-release` payload, matching the repository's release-image
+build workflow. The `4.22` compose investigation and run results below are
+retained as historical findings, not current workflow configuration.
 
 This research follows [`openshift/os` at
 `3d00d375d491de94fd9dcd0b5440a0efbec3d9db`](https://github.com/openshift/os/tree/3d00d375d491de94fd9dcd0b5440a0efbec3d9db)

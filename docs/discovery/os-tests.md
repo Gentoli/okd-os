@@ -16,11 +16,12 @@ account.
    `ghcr.io/gentoli/okd-stream-coreos:latest`; manual runs can supply a tag or
    digest. Use a digest for a repeatable test of an exact build.
 2. Pull the candidate from GHCR and the upstream comparison image from its
-   registry with Skopeo, saving each as a local OCI archive. The default
-   upstream reference is
-   `quay.io/okd/centos-stream-coreos-9:419.9.202503111432-0-x86_64`. No 4.20
-   image tag is published in that repository, so this is its latest available
-   release image for comparison.
+   registry with Skopeo, saving each as a local OCI archive. The workflow
+   resolves `stream-coreos` from its configurable release payload with
+   `oc adm release info`; the default payload is the same pinned
+   `quay.io/okd/scos-release` image used by the release-image build workflow.
+   No 4.20 tag is published in the separate public
+   `quay.io/okd/centos-stream-coreos-9` repository.
 3. Build a matching SCOS `c9s` QEMU base with COSA. This is Kola's bootable
    starting disk; the final OCI image itself is not converted to an ISO. The
    base workflow uploads the QEMU disk as a run-specific artifact.
@@ -46,8 +47,9 @@ The implemented
 [`test-okd-stream-coreos.yml`](../../.github/workflows/test-okd-stream-coreos.yml)
 workflow runs automatically after a successful main-branch image build and can
 also be dispatched manually with full image pullspecs and a SCOS base workflow
-run ID. Automatic runs use the `latest` GHCR tag and the repository variable
-`OKD_SCOS_BASE_RUN_ID`; manual runs default to the same image references.
+run ID. Automatic runs use the `latest` GHCR tag, the default release payload,
+and the repository variable `OKD_SCOS_BASE_RUN_ID`; manual runs can override
+the image and release payload.
 Select a SCOS base run that produced the exact base image digest used by the
 candidate. The image build publishes `latest` on main in addition to its
 versioned and immutable run tags.
