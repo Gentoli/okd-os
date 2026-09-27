@@ -22,6 +22,16 @@ Running it confirmed `ID=centos`, `VERSION_ID=9`, and
 package set. The public image removes the need for an OpenShift pull secret just
 to obtain the base; it does not provide the OpenShift RPM repositories.
 
+This confirms compatibility at the OS-family and image-role level, not
+byte-for-byte equivalence with the private upstream base. The `c9s` tag is
+mutable. This repository's
+[`build-scos-base.yml`](.github/workflows/build-scos-base.yml) defaults
+`config_ref` to `HEAD` and applies a local `fwupd-plugin-flashrom` patch before
+building. Its `c9s-<workflow commit>` tag identifies the workflow-repository
+commit, not necessarily the CoreOS config revision. For reproducibility, pin
+the base by the digest above and record the CoreOS config ref and patch used;
+the workflow publishes only the x86_64 archive.
+
 ## How the pinned build composes the image
 
 The upstream [`Containerfile`](https://github.com/openshift/os/blob/3d00d375d491de94fd9dcd0b5440a0efbec3d9db/Containerfile)
@@ -54,8 +64,12 @@ copied into the final image.
 
 The local build guide's sample output tag says `4.21`, while this pinned
 manifest and release configuration target OpenShift `4.22`; use a `4.22` tag
-for this snapshot. The upstream guide notes that its example version details
-may be stale.
+for this snapshot. Those guide examples are stale for this pinned source.
+There is additional repo-version skew: the pinned
+[`c9s.repo`](https://github.com/openshift/os/blob/3d00d375d491de94fd9dcd0b5440a0efbec3d9db/c9s.repo#L67-L76)
+points `c9s-sig-cloud-okd` at the OKD 4.20 directory and comments that it needs
+updating to 4.21, even though the package manifest selects it in a 4.22 build.
+Do not assume the public repo definitions alone supply the pinned package set.
 
 ## Required repository access
 
@@ -119,7 +133,13 @@ is implied by this failed attempt.
 ## CI context and source links
 
 At the pinned commit, [`openshift/release`'s 4.22 config](https://github.com/openshift/release/blob/06c6fdbe105cccc2e7a06d4dd23cae71b8caaeda/ci-operator/config/openshift/os/openshift-os-release-4.22.yaml)
-maps the `c9s-coreos` input to the node-image build and sets `OPENSHIFT_CI=1`.
+maps a `rhel-coreos-base:9.8` input to the Containerfile's `c9s-coreos` alias
+and sets `OPENSHIFT_CI=1`. This is an internal ci-operator build, not a public
+local-build recipe. Its generated Prow job uses registry pull/push and
+reporting credentials. The checked
+[`master` OKD SCOS config](https://github.com/openshift/release/blob/06c6fdbe105cccc2e7a06d4dd23cae71b8caaeda/ci-operator/config/openshift/os/openshift-os-master__okd-scos.yaml)
+instead uses `stream-coreos-base:10` for its `stream-coreos` build; it does not
+validate this pinned c9s base.
 The upstream [`README`](https://github.com/openshift/os/blob/3d00d375d491de94fd9dcd0b5440a0efbec3d9db/README.md)
 describes `stream-coreos` as the final image in the release payload. For more
 background on how this repository produces the base image, see
