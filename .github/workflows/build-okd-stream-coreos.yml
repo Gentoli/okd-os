@@ -86,11 +86,12 @@ jobs:
             exit 0
           fi
 
-          endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/rpm-build.yml/runs"
+          endpoint="repos/${GITHUB_REPOSITORY}/actions/runs"
           for branch in "$GITHUB_REF_NAME" main; do
-            runs=$(gh api "$endpoint" -f "branch=$branch" -f per_page=20)
+            runs=$(gh api "$endpoint" -f "branch=$branch" -f per_page=100)
             run=$(jq -c \
               '[.workflow_runs[] | select(
+                .path == ".github/workflows/rpm-build.yml" and
                 .status == "completed" and .conclusion == "success"
               )] |
                sort_by(.run_number) | last // empty' <<< "$runs")
