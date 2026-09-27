@@ -19,15 +19,18 @@ on:
         required: true
         default: ghcr.io/gentoli/okd-stream-coreos:latest
         type: string
-      upstream_image_ref:
-        description: Full upstream SCOS image pullspec for comparison
-        required: true
-        default: quay.io/okd/centos-stream-coreos-9:4.18-x86_64
+      release_image:
+        description: >-
+          Release payload to resolve the upstream stream-coreos image from.
+        required: false
+        default: "quay.io/okd/scos-release@sha256:\
+          ea8a1ccc0173d6d880a7ce880b11f954fa18fda74afe8c2ce7ce48086e94101b"
         type: string
 
 env:
   DEFAULT_OKD_IMAGE_REF: ghcr.io/gentoli/okd-stream-coreos:latest
-  DEFAULT_UPSTREAM_IMAGE_REF: quay.io/okd/centos-stream-coreos-9:4.18-x86_64
+  DEFAULT_RELEASE_IMAGE: "quay.io/okd/scos-release@sha256:\
+    ea8a1ccc0173d6d880a7ce880b11f954fa18fda74afe8c2ce7ce48086e94101b"
   OPENSHIFT_OS_REF: 3d00d375d491de94fd9dcd0b5440a0efbec3d9db
 
 permissions:
@@ -79,23 +82,28 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install oc
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: "4"
+
       - name: Select image references and SCOS base run
         id: test-inputs
         env:
           INPUT_SCOS_RUN_ID: ${{ inputs.scos_run_id }}
           INPUT_OKD_IMAGE_REF: ${{ inputs.oci_image_ref }}
-          INPUT_UPSTREAM_IMAGE_REF: ${{ inputs.upstream_image_ref }}
+          INPUT_RELEASE_IMAGE: ${{ inputs.release_image }}
           CONFIGURED_SCOS_RUN_ID: ${{ vars.OKD_SCOS_BASE_RUN_ID }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
             scos_run_id="$CONFIGURED_SCOS_RUN_ID"
             oci_image_ref="$DEFAULT_OKD_IMAGE_REF"
-            upstream_image_ref="$DEFAULT_UPSTREAM_IMAGE_REF"
+            release_image="$DEFAULT_RELEASE_IMAGE"
           else
             scos_run_id="$INPUT_SCOS_RUN_ID"
             oci_image_ref="$INPUT_OKD_IMAGE_REF"
-            upstream_image_ref="$INPUT_UPSTREAM_IMAGE_REF"
+            release_image="$INPUT_RELEASE_IMAGE"
           fi
 
           if [[ ! "$scos_run_id" =~ ^[0-9]{1,20}$ ]]; then
@@ -103,12 +111,21 @@ jobs:
               "to a successful SCOS base workflow run ID." >&2
             exit 1
           fi
-          for image_ref in "$oci_image_ref" "$upstream_image_ref"; do
+          for image_ref in "$oci_image_ref" "$release_image"; do
             if [[ ! "$image_ref" =~ ^[^[:space:]\|]+$ || "$image_ref" == docker://* ]]; then
               echo "Provide full image pullspecs without whitespace or docker://." >&2
               exit 1
             fi
           done
+          upstream_image_ref=$(
+            oc adm release info --image-for stream-coreos "$release_image"
+          )
+          if [[ ! "$upstream_image_ref" =~ ^[^[:space:]\|]+$ ||
+            "$upstream_image_ref" == docker://* ]]; then
+            echo "The release payload did not resolve to a valid" \
+              "stream-coreos image." >&2
+            exit 1
+          fi
           echo "oci_image_ref=$oci_image_ref" >> "$GITHUB_OUTPUT"
           echo "upstream_image_ref=$upstream_image_ref" >> "$GITHUB_OUTPUT"
           echo "scos_run_id=$scos_run_id" >> "$GITHUB_OUTPUT"
