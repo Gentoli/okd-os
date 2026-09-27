@@ -192,6 +192,17 @@ workflow run; publish the RPMs and `repodata` together, retain old versions, and
 apply access control/signing appropriate to the packages. Do not point DNF at
 the temporary artifact-download URL or at the ZIP itself.
 
+## Manual node-image workflow
+
+The manual-only
+[`build-okd-stream-coreos.yml`](.github/workflows/build-okd-stream-coreos.yml)
+workflow takes the run ID of a successful RPM build, downloads its EL9 RPM
+artifacts, generates local repo metadata, and composes the pinned `openshift/os`
+source against the pinned SCOS base digest. It pushes the requested tag
+(default `4.22`) and a run-specific tag to
+`ghcr.io/gentoli/okd-stream-coreos`, and uploads an OCI archive as a 14-day
+workflow artifact. It has no push or scheduled trigger.
+
 ## CI context and source links
 
 At the pinned commit, [`openshift/release`'s 4.22 config](https://github.com/openshift/release/blob/06c6fdbe105cccc2e7a06d4dd23cae71b8caaeda/ci-operator/config/openshift/os/openshift-os-release-4.22.yaml)
