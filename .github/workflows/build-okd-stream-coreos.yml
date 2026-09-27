@@ -96,8 +96,8 @@ jobs:
           set -euo pipefail
           script=build-node-image.sh
           old="ose-crio-* "
-          new="ose-crio-* ecr-credential-provider* acr-credential-provider*"
-          new+=" gcr-credential-provider* crio-credential-provider* "
+          new="ose-crio-*,ecr-credential-provider*,acr-credential-provider*"
+          new+=",gcr-credential-provider*,crio-credential-provider* "
           if [[ $(grep -Fo "$old" "$script" | wc -l) -ne 1 ]]; then
             echo "Pinned OS repo package allowlist not found as expected." >&2
             exit 1
