@@ -29,9 +29,9 @@ on:
 
 env:
   DEFAULT_OKD_IMAGE_REF: ghcr.io/gentoli/okd-stream-coreos:latest
+  OPENSHIFT_OS_REF: 847b7d8c3b60f60e86f1de0b7efebb746c75d1bc
   DEFAULT_RELEASE_IMAGE: "quay.io/okd/scos-release@sha256:\
     ea8a1ccc0173d6d880a7ce880b11f954fa18fda74afe8c2ce7ce48086e94101b"
-  OPENSHIFT_OS_REF: 3d00d375d491de94fd9dcd0b5440a0efbec3d9db
 
 permissions:
   actions: read
@@ -236,7 +236,7 @@ jobs:
                   run \
                   --output-dir "$KOLA_OUTPUT_DIR" \
                   --platform qemu --distro scos --tag openshift \
-                  --denylist-stream 4.22-c9s \
+                  --denylist-stream 4.20-c9s \
                   --denylist-test ext.openshift-os.version.rhaos-pkgs-match-openshift \
                   --oscontainer "$OCI_ARCHIVE" \
                   --append-ignition "$RUNNER_TEMP/disable-zincati.ign" \
