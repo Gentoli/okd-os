@@ -1,5 +1,28 @@
 # Building the OKD node image from the published SCOS base
 
+## Current target: 4.20
+
+The active node-image and Kola workflows now target `openshift/os` commit
+[`847b7d8c3b60f60e86f1de0b7efebb746c75d1bc`](https://github.com/openshift/os/tree/847b7d8c3b60f60e86f1de0b7efebb746c75d1bc)
+from `release-4.20`. This was checked at that exact commit: its
+[`Containerfile`](https://github.com/openshift/os/blob/847b7d8c3b60f60e86f1de0b7efebb746c75d1bc/Containerfile)
+still starts from `c9s-coreos`; its
+[`packages-openshift.yaml`](https://github.com/openshift/os/blob/847b7d8c3b60f60e86f1de0b7efebb746c75d1bc/packages-openshift.yaml)
+targets `4.20`, uses the CentOS 9 package set, and includes
+`rhel-9.6-server-ose-4.20-okd`. The 4.20 build script takes the corresponding
+`rhel-9.6-server-ose-4.20` stanza from the repository file and renames it to
+that manifest alias. The manifest requests the AWS, Azure, and GCP credential
+providers, but not the CRI-O credential provider. The RPM and node-image
+workflows follow those requirements. The matching
+[`openshift/release` 4.20 config](https://github.com/openshift/release/blob/main/ci-operator/config/openshift/os/openshift-os-release-4.20.yaml)
+maps its RHEL 9.6 base input to the same `c9s-coreos` alias.
+
+There is no public `4.20` tag in `quay.io/okd/centos-stream-coreos-9`; its
+latest published release image is `419.9.202503111432-0-x86_64`, which the Kola
+workflow uses as the upstream comparison. The `4.22` compose investigation and
+run results below are retained as historical findings, not current workflow
+configuration.
+
 This research follows [`openshift/os` at
 `3d00d375d491de94fd9dcd0b5440a0efbec3d9db`](https://github.com/openshift/os/tree/3d00d375d491de94fd9dcd0b5440a0efbec3d9db)
 and uses the public base image
@@ -192,7 +215,7 @@ workflow run; publish the RPMs and `repodata` together, retain old versions, and
 apply access control/signing appropriate to the packages. Do not point DNF at
 the temporary artifact-download URL or at the ZIP itself.
 
-## Node-image workflow
+## Current node-image workflow
 
 The
 [`build-okd-stream-coreos.yml`](.github/workflows/build-okd-stream-coreos.yml)
@@ -204,19 +227,18 @@ and update it when selecting a newer RPM build. Manual dispatch can instead use
 an explicit successful run ID. The workflows have independent push triggers:
 the image build does not wait for or start the RPM workflow, and retrieves
 cross-run artifacts with `actions/download-artifact`. Builds on `main` publish
-the `4.22` tag; other branches use a branch-and-commit-specific tag so they do
+the `4.20` tag; other branches use a branch-and-commit-specific tag so they do
 not overwrite it. Every build also pushes a run-specific tag to
 `ghcr.io/gentoli/okd-stream-coreos` and uploads an OCI archive as a 14-day
 workflow artifact.
 
 The provider RPMs are correctly named `ecr-credential-provider`,
-`acr-credential-provider`, `gcr-credential-provider`, and
-`crio-credential-provider`; their RPM metadata provides the `ose-*` names
-requested by the OS manifest. The pinned upstream compose script's repository
-allowlist originally excluded these actual package names, so DNF filtered the
-provider capabilities out. The workflow extends that allowlist in its
-temporary `openshift/os` checkout before composing; it leaves the RPM names and
-manifest unchanged.
+`acr-credential-provider`, and `gcr-credential-provider`; their RPM metadata
+provides the three `ose-*` capabilities requested by the 4.20 manifest. The
+pinned upstream compose script's repository allowlist excludes these actual
+package names, so the workflow extends that allowlist in its temporary
+`openshift/os` checkout before composing; it leaves the RPM names and manifest
+unchanged.
 
 ## CI context and source links
 

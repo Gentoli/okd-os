@@ -2,7 +2,8 @@
 
 Reviewed 2026-09-27. This smoke test targets the final OKD/SCOS node image
 composed from the pinned `openshift/os` source, not the separate SCOS base or
-the RPMs in isolation.
+the RPMs in isolation. The active image and test workflows now pin the
+`release-4.20` source at `847b7d8c3b60f60e86f1de0b7efebb746c75d1bc`.
 
 ## Recommended base-level test
 
@@ -17,7 +18,9 @@ account.
 2. Pull the candidate from GHCR and the upstream comparison image from its
    registry with Skopeo, saving each as a local OCI archive. The default
    upstream reference is
-   `quay.io/okd/centos-stream-coreos-9:4.18-x86_64`.
+   `quay.io/okd/centos-stream-coreos-9:419.9.202503111432-0-x86_64`. No 4.20
+   image tag is published in that repository, so this is its latest available
+   release image for comparison.
 3. Build a matching SCOS `c9s` QEMU base with COSA. This is Kola's bootable
    starting disk; the final OCI image itself is not converted to an ISO. The
    base workflow uploads the QEMU disk as a run-specific artifact.
@@ -69,7 +72,7 @@ manual-dispatch window. The existing
 is useful coverage for RPM artifacts, but it does not boot the composed node
 image.
 
-### Local Kola validation
+### Historical 4.22 local Kola validation
 
 On 2026-09-27, Kola pivoted the published image
 (`sha256:c591da8f18a0247fdc856b8cbbfb4a4bfa85df8ab40635b4093be2ece85387a0`)
@@ -77,16 +80,15 @@ from a QEMU base built with the pinned c9s config. The Open vSwitch hugetlbfs
 assertion and `rhcos.network.init-interfaces-test` passed after the reboot.
 `crio.base` failed: CRI-O exited with `invalid plugin_dirs entry: mkdir
 /opt/cni: file exists`, so the CRI socket was absent and kubelet could not
-start. The workflow intentionally keeps that upstream Kola test enabled; this
-current image should not be considered smoke-clean until the CRI-O startup
-failure is understood.
+start. This result applies to the historical 4.22 image; the 4.20 candidate
+needs its own Kola run before drawing a conclusion about CRI-O startup.
 
 An initial trial using a Fedora CoreOS QEMU disk instead of the matching SCOS
 base staged the pivot but failed OSTree staged-deployment finalization while
 loading the SCOS SELinux policy. The test therefore uses a c9s QEMU base built
 alongside the SCOS base rather than an unrelated generic CoreOS disk.
 
-### Upstream comparison status
+### Historical upstream comparison status
 
 On 2026-09-27, the workflow's Skopeo copy-and-inspect path succeeded for both
 `ghcr.io/gentoli/okd-stream-coreos:4.22` (amd64, version
@@ -104,14 +106,14 @@ results independently.
 
 ## Existing upstream Kola tests
 
-The current [`openshift/os` Kola test tree](https://github.com/openshift/os/tree/master/tests/kola)
+The pinned [`openshift/os` 4.20 Kola test tree](https://github.com/openshift/os/tree/847b7d8c3b60f60e86f1de0b7efebb746c75d1bc/tests/kola)
 contains two image-oriented tests:
 
-- [`openvswitch-hugetlbfs-groups`](https://github.com/openshift/os/blob/master/tests/kola/files/openvswitch-hugetlbfs-groups)
+- [`openvswitch-hugetlbfs-groups`](https://github.com/openshift/os/blob/847b7d8c3b60f60e86f1de0b7efebb746c75d1bc/tests/kola/files/openvswitch-hugetlbfs-groups)
   checks that the `openvswitch` user belongs to the `hugetlbfs` group. It
   declares support for x86_64 and ppc64le; the current OKD image workflow
   produces x86_64.
-- [`rhaos-pkgs-match-openshift`](https://github.com/openshift/os/blob/master/tests/kola/version/rhaos-pkgs-match-openshift)
+- [`rhaos-pkgs-match-openshift`](https://github.com/openshift/os/blob/847b7d8c3b60f60e86f1de0b7efebb746c75d1bc/tests/kola/version/rhaos-pkgs-match-openshift)
   checks that RHAOS RPMs match `OPENSHIFT_VERSION`. The script says it is RHCOS
   only and excludes packages with known version exceptions, so it should not be
   copied unchanged for SCOS. Adapt the assertion only after confirming which
@@ -124,7 +126,7 @@ and artifact handoff that the assertions alone do not cover.
 
 ## Additional OpenShift CI coverage
 
-The [`openshift/os` 4.22 ci-operator config](https://github.com/openshift/release/blob/main/ci-operator/config/openshift/os/openshift-os-release-4.22.yaml)
+The [`openshift/os` 4.20 ci-operator config](https://github.com/openshift/release/blob/main/ci-operator/config/openshift/os/openshift-os-release-4.20.yaml)
 defines an optional `e2e-aws` test using the `openshift-e2e-aws` workflow. Its
 `latest` release includes built images, so this is broader cluster-level
 coverage of the candidate image, rather than a focused single-node smoke test.

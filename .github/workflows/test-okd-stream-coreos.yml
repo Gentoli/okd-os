@@ -22,13 +22,13 @@ on:
       upstream_image_ref:
         description: Full upstream SCOS image pullspec for comparison
         required: true
-        default: quay.io/okd/centos-stream-coreos-9:4.18-x86_64
+        default: quay.io/okd/centos-stream-coreos-9:419.9.202503111432-0-x86_64
         type: string
 
 env:
   DEFAULT_OKD_IMAGE_REF: ghcr.io/gentoli/okd-stream-coreos:latest
-  DEFAULT_UPSTREAM_IMAGE_REF: quay.io/okd/centos-stream-coreos-9:4.18-x86_64
-  OPENSHIFT_OS_REF: 3d00d375d491de94fd9dcd0b5440a0efbec3d9db
+  DEFAULT_UPSTREAM_IMAGE_REF: quay.io/okd/centos-stream-coreos-9:419.9.202503111432-0-x86_64
+  OPENSHIFT_OS_REF: 847b7d8c3b60f60e86f1de0b7efebb746c75d1bc
 
 permissions:
   actions: read
@@ -219,7 +219,7 @@ jobs:
                   run \
                   --output-dir "$KOLA_OUTPUT_DIR" \
                   --platform qemu --distro scos --tag openshift \
-                  --denylist-stream 4.22-c9s \
+                  --denylist-stream 4.20-c9s \
                   --denylist-test ext.openshift-os.version.rhaos-pkgs-match-openshift \
                   --oscontainer "$OCI_ARCHIVE" \
                   --append-ignition "$RUNNER_TEMP/disable-zincati.ign" \

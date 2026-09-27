@@ -6,6 +6,16 @@ before the `c9s` references were removed. The key distinction is that this
 repository builds the final OpenShift/OKD node image on top of a separate
 RHCOS/SCOS base; it does not build that base or compile its RPMs.
 
+The active image workflow now pins
+[`openshift/os` 4.20 at `847b7d8`](https://github.com/openshift/os/tree/847b7d8c3b60f60e86f1de0b7efebb746c75d1bc).
+Unlike the older snapshot documented below, this 4.20 source still uses
+`c9s-coreos`; its manifest selects CentOS 9 and the
+`rhel-9.6-server-ose-4.20-okd` repo alias. The corresponding
+[`openshift/release` 4.20 config](https://github.com/openshift/release/blob/main/ci-operator/config/openshift/os/openshift-os-release-4.20.yaml)
+maps the RHEL 9.6 base input to `c9s-coreos`.
+The workflow pin and repo details are recorded in
+[`okd-os.md`](../../okd-os.md#current-target-420).
+
 ## Build and package flow
 
 The upstream [README](https://github.com/openshift/os/blob/3d00d375d491de94fd9dcd0b5440a0efbec3d9db/README.md)
