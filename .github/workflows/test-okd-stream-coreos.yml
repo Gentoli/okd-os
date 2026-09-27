@@ -15,7 +15,7 @@ on:
         required: true
         type: string
       oci_image_ref:
-        description: Full GHCR OCI image pullspec (tag or digest)
+        description: Full GHCR image pullspec (tag or sha256 digest)
         required: true
         default: ghcr.io/gentoli/okd-stream-coreos:latest
         type: string
@@ -103,10 +103,12 @@ jobs:
               "to a successful SCOS base workflow run ID." >&2
             exit 1
           fi
-          if [[ -z "$oci_image_ref" || -z "$upstream_image_ref" ]]; then
-            echo "Both OCI image references must be set." >&2
-            exit 1
-          fi
+          for image_ref in "$oci_image_ref" "$upstream_image_ref"; do
+            if [[ ! "$image_ref" =~ ^[^[:space:]\|]+$ || "$image_ref" == docker://* ]]; then
+              echo "Provide full image pullspecs without whitespace or docker://." >&2
+              exit 1
+            fi
+          done
           echo "oci_image_ref=$oci_image_ref" >> "$GITHUB_OUTPUT"
           echo "upstream_image_ref=$upstream_image_ref" >> "$GITHUB_OUTPUT"
           echo "scos_run_id=$scos_run_id" >> "$GITHUB_OUTPUT"
@@ -192,18 +194,19 @@ jobs:
           set -euo pipefail
           build_dir="$RUNNER_TEMP/kola-workdir"
           mkdir -p "$build_dir/tmp"
-          chown builder:builder "$build_dir"
           results_dir="$build_dir/tmp/kola-${GITHUB_RUN_ID}"
           if [[ -e "$results_dir" ]]; then
             echo "Kola output directory already exists: $results_dir" >&2
             exit 1
           fi
+          mkdir "$results_dir"
+          chown -R builder:builder "$build_dir"
           test_status=0
           for image in \
             "okd|$RUNNER_TEMP/okd-image/okd.ociarchive" \
             "upstream|$RUNNER_TEMP/upstream-image/upstream.ociarchive"; do
             IFS='|' read -r label archive <<< "$image"
-            image_results_dir="$build_dir/tmp/kola-${GITHUB_RUN_ID}-${label}"
+            image_results_dir="$results_dir/$label"
             if ! runuser -u builder -- env \
               GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
               RUNNER_TEMP="$RUNNER_TEMP" \
@@ -213,14 +216,14 @@ jobs:
               /bin/bash -euo pipefail -c '
                 kola \
                   --qemu-image "$QEMU_IMAGE" \
+                  run \
                   --output-dir "$KOLA_OUTPUT_DIR" \
                   --platform qemu --distro scos --tag openshift \
                   --denylist-stream 4.22-c9s \
                   --denylist-test ext.openshift-os.version.rhaos-pkgs-match-openshift \
                   --oscontainer "$OCI_ARCHIVE" \
                   --append-ignition "$RUNNER_TEMP/disable-zincati.ign" \
-                  --exttest "$GITHUB_WORKSPACE/openshift-os" \
-                  run
+                  --exttest "$GITHUB_WORKSPACE/openshift-os"
               '; then
               echo "::error::Kola tests failed for the $label image."
               test_status=1
@@ -233,6 +236,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: okd-kola-results-${{ github.run_id }}
-          path: ${{ runner.temp }}/kola-workdir/tmp/kola-${{ github.run_id }}-*/
+          path: ${{ runner.temp }}/kola-workdir/tmp/kola-${{ github.run_id }}/
           if-no-files-found: warn
           retention-days: 14

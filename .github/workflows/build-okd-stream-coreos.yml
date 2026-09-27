@@ -181,8 +181,6 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             podman push "${image_ref}:latest"
           fi
-          podman save --format oci-archive \
-            --output "$RUNNER_TEMP/okd-stream-coreos.oci.tar" "$LOCAL_IMAGE"
           {
             echo "Published \`${image_ref}:${IMAGE_TAG}\`"
             echo "Immutable run tag: \`${image_ref}:${run_tag}\`"
@@ -190,11 +188,3 @@ jobs:
               echo "Default smoke-test tag: \`${image_ref}:latest\`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Archive image as a workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: okd-stream-coreos-${{ github.run_id }}
-          path: ${{ runner.temp }}/okd-stream-coreos.oci.tar
-          compression-level: 0
-          retention-days: 14
