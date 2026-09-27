@@ -1,0 +1,191 @@
+name: Build and Publish OKD Stream CoreOS
+
+on:
+  push:
+    paths:
+      - .github/workflows/build-okd-stream-coreos.yml
+  workflow_dispatch:
+    inputs:
+      rpm_run_id:
+        description: Successful RPM Build Reproduction run ID
+        required: true
+        type: string
+      image_tag:
+        description: Additional mutable GHCR image tag
+        required: true
+        default: '4.22'
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-okd-stream-coreos
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      RPM_RUN_ID: ${{ inputs.rpm_run_id || vars.OKD_RPM_RUN_ID }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      BASE_IMAGE: ghcr.io/gentoli/okd-os-scos-base
+      BASE_IMAGE_DIGEST_HEAD: 27818dd2e0f2097df2e6a9c5518ae737
+      BASE_IMAGE_DIGEST_TAIL: a939d416e3f3a352f26fc05a2c1331d1
+      OS_REF: 3d00d375d491de94fd9dcd0b5440a0efbec3d9db
+    steps:
+      - name: Validate inputs and select image tag
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ ! "$RPM_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
+              echo "rpm_run_id must be a numeric workflow run ID." >&2
+              exit 1
+            fi
+            image_tag="${IMAGE_TAG:-4.22}"
+          elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            image_tag="4.22"
+          else
+            branch_tag=$(
+              printf '%s' "$GITHUB_REF_NAME" |
+                tr '[:upper:]' '[:lower:]' |
+                sed -E 's/[^a-z0-9_.-]+/-/g; s/^[^a-z0-9_]+//; s/[-.]+$//' |
+                cut -c1-60
+            )
+            image_tag="${branch_tag:-branch}-${GITHUB_SHA:0:12}"
+          fi
+
+          if [[ ! "$image_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$ ]]; then
+            echo "image_tag must be a valid container tag" \
+              "of at most 80 characters." >&2
+            exit 1
+          fi
+          echo "IMAGE_TAG=$image_tag" >> "$GITHUB_ENV"
+
+      - name: Select RPM artifact run ID
+        id: rpm-run
+        run: |
+          set -euo pipefail
+          if [[ ! "$RPM_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
+            echo "Set rpm_run_id or the OKD_RPM_RUN_ID repository variable" \
+              "to a successful RPM workflow run ID." >&2
+            exit 1
+          fi
+          echo "run_id=$RPM_RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Install Podman and RPM repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y podman createrepo-c
+
+      - name: Checkout pinned openshift/os source
+        uses: actions/checkout@v4
+        with:
+          repository: openshift/os
+          ref: ${{ env.OS_REF }}
+          path: openshift-os
+          persist-credentials: false
+
+      - name: Allow provider RPM package names in the local repo
+        working-directory: openshift-os
+        run: |
+          set -euo pipefail
+          script=build-node-image.sh
+          old="ose-crio-* "
+          new="ose-crio-*,ecr-credential-provider*,acr-credential-provider*"
+          new+=",gcr-credential-provider*,crio-credential-provider* "
+          if [[ $(grep -Fo "$old" "$script" | wc -l) -ne 1 ]]; then
+            echo "Pinned OS repo package allowlist not found as expected." >&2
+            exit 1
+          fi
+          sed -i "s/ose-crio-\\* /${new}/" "$script"
+          grep -F "includepkgs=" "$script"
+
+      - name: Download RPM build artifacts
+        uses: actions/download-artifact@v4.1.3
+        with:
+          pattern: '*-rpms-*el9'
+          path: ${{ runner.temp }}/okd-rpms
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.rpm-run.outputs.run_id }}
+
+      - name: Prepare local RPM repository
+        run: |
+          set -euo pipefail
+          rpm_dir="$RUNNER_TEMP/okd-rpms"
+          mapfile -d '' rpms < <(
+            find "$rpm_dir" -type f -name '*.rpm' -print0
+          )
+          if (( ${#rpms[@]} == 0 )); then
+            echo "The selected run has no EL9 RPM artifacts." >&2
+            exit 1
+          fi
+          for package in \
+            ecr-credential-provider \
+            acr-credential-provider \
+            gcr-credential-provider \
+            crio-credential-provider; do
+            if ! find "$rpm_dir" -type f \
+              -name "${package}-*.rpm" -print -quit | grep -q .; then
+              echo "The selected run is missing ${package} RPMs." >&2
+              exit 1
+            fi
+          done
+
+          createrepo_c "$rpm_dir"
+          cat > "$RUNNER_TEMP/yumrepos" <<'EOF'
+          [rhel-9.8-server-ose-4.22]
+          name=OpenShift RPM build artifacts
+          baseurl=file:///var/tmp/okd-rpm-repo
+          enabled=1
+          gpgcheck=0
+          EOF
+
+      - name: Compose OKD Stream CoreOS image
+        run: |
+          set -euo pipefail
+          base_ref="${BASE_IMAGE}@sha256:"
+          base_ref+="${BASE_IMAGE_DIGEST_HEAD}${BASE_IMAGE_DIGEST_TAIL}"
+          local_image="localhost/okd-stream-coreos:${IMAGE_TAG}"
+          podman build \
+            --from "$base_ref" \
+            --secret id=yumrepos,src="$RUNNER_TEMP/yumrepos" \
+            --volume "$RUNNER_TEMP/okd-rpms:/var/tmp/okd-rpm-repo:ro" \
+            --security-opt label=disable \
+            --tag "$local_image" \
+            "$GITHUB_WORKSPACE/openshift-os"
+          echo "LOCAL_IMAGE=$local_image" >> "$GITHUB_ENV"
+
+      - name: Publish image to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/okd-stream-coreos"
+          run_tag="${IMAGE_TAG}-rpm${RPM_RUN_ID}-${GITHUB_SHA:0:12}"
+          printf '%s' "$GHCR_TOKEN" |
+            podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          podman tag "$LOCAL_IMAGE" "${image_ref}:${IMAGE_TAG}"
+          podman tag "$LOCAL_IMAGE" "${image_ref}:${run_tag}"
+          podman push "${image_ref}:${IMAGE_TAG}"
+          podman push "${image_ref}:${run_tag}"
+          podman save --format oci-archive \
+            --output "$RUNNER_TEMP/okd-stream-coreos.oci.tar" "$LOCAL_IMAGE"
+          {
+            echo "Published \`${image_ref}:${IMAGE_TAG}\`"
+            echo "Immutable run tag: \`${image_ref}:${run_tag}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Archive image as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: okd-stream-coreos-${{ github.run_id }}
+          path: ${{ runner.temp }}/okd-stream-coreos.oci.tar
+          compression-level: 0
+          retention-days: 14
