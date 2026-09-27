@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - .github/workflows/rpm-build.yml
+      - .github/workflows/build-okd-stream-coreos.yml
   workflow_dispatch:
 
 permissions:

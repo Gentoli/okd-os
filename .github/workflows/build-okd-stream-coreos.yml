@@ -1,6 +1,10 @@
 name: Build and Publish OKD Stream CoreOS
 
 on:
+  push:
+    paths:
+      - .github/workflows/rpm-build.yml
+      - .github/workflows/build-okd-stream-coreos.yml
   workflow_dispatch:
     inputs:
       rpm_run_id:
@@ -25,6 +29,7 @@ concurrency:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     env:
       RPM_RUN_ID: ${{ inputs.rpm_run_id }}
       IMAGE_TAG: ${{ inputs.image_tag }}
@@ -33,18 +38,81 @@ jobs:
       BASE_IMAGE_DIGEST_TAIL: a939d416e3f3a352f26fc05a2c1331d1
       OS_REF: 3d00d375d491de94fd9dcd0b5440a0efbec3d9db
     steps:
-      - name: Validate workflow inputs
+      - name: Validate inputs and select image tag
         run: |
           set -euo pipefail
-          if [[ ! "$RPM_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
-            echo "rpm_run_id must be a numeric workflow run ID." >&2
-            exit 1
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ ! "$RPM_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
+              echo "rpm_run_id must be a numeric workflow run ID." >&2
+              exit 1
+            fi
+            image_tag="${IMAGE_TAG:-4.22}"
+          elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            image_tag="4.22"
+          else
+            branch_tag=$(
+              printf '%s' "$GITHUB_REF_NAME" |
+                tr '[:upper:]' '[:lower:]' |
+                sed -E 's/[^a-z0-9_.-]+/-/g; s/^[^a-z0-9_]+//; s/[-.]+$//' |
+                cut -c1-60
+            )
+            image_tag="${branch_tag:-branch}-${GITHUB_SHA:0:12}"
           fi
-          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$ ]]; then
+
+          if [[ ! "$image_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$ ]]; then
             echo "image_tag must be a valid container tag" \
               "of at most 80 characters." >&2
             exit 1
           fi
+          echo "IMAGE_TAG=$image_tag" >> "$GITHUB_ENV"
+
+      - name: Resolve successful RPM build run
+        id: rpm-run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            run=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${RPM_RUN_ID}")
+            if [[ "$(jq -r '.path' <<< "$run")" != \
+                  ".github/workflows/rpm-build.yml" ]] ||
+               [[ "$(jq -r '.status' <<< "$run")" != "completed" ]] ||
+               [[ "$(jq -r '.conclusion' <<< "$run")" != "success" ]]; then
+              echo "rpm_run_id must identify a successful RPM workflow run." >&2
+              exit 1
+            fi
+            echo "run_id=$RPM_RUN_ID" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/rpm-build.yml/runs"
+          for attempt in $(seq 1 240); do
+            runs=$(gh api "$endpoint" -f "head_sha=$GITHUB_SHA" -f per_page=20)
+            run=$(jq -c --arg sha "$GITHUB_SHA" \
+              '[.workflow_runs[] | select(.head_sha == $sha)] |
+               sort_by(.run_number) | last // empty' <<< "$runs")
+            if [[ -n "$run" ]]; then
+              status=$(jq -r '.status' <<< "$run")
+              if [[ "$status" == "completed" ]]; then
+                if [[ "$(jq -r '.conclusion' <<< "$run")" != "success" ]]; then
+                  echo "The RPM workflow for this push did not succeed." >&2
+                  exit 1
+                fi
+                run_id=$(jq -r '.id' <<< "$run")
+                echo "Using successful RPM workflow run $run_id."
+                echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "Waiting for RPM workflow run $(jq -r '.id' <<< "$run")."
+            else
+              echo "Waiting for the RPM workflow run for $GITHUB_SHA."
+            fi
+            sleep 60
+          done
+          echo "Timed out waiting for the matching RPM workflow run." >&2
+          exit 1
 
       - name: Install Podman and RPM repository tools
         run: |
@@ -67,7 +135,7 @@ jobs:
           merge-multiple: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.rpm_run_id }}
+          run-id: ${{ steps.rpm-run.outputs.run_id }}
 
       - name: Prepare local RPM repository
         run: |
