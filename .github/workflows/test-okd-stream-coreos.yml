@@ -1,0 +1,202 @@
+name: Test OKD Stream CoreOS OCI
+
+on:
+  workflow_run:
+    workflows:
+      - Build and Publish OKD Stream CoreOS
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      image_run_id:
+        description: Successful Build and Publish OKD Stream CoreOS run ID
+        required: true
+        type: string
+
+env:
+  COREOS_CONFIG_REF: fd27dd732172d0cefca97b283252b1f31c9d7f21
+  COREOS_CONFIG_PATH: os/base/c9s/source
+  OPENSHIFT_OS_REF: 3d00d375d491de94fd9dcd0b5440a0efbec3d9db
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: test-okd-stream-coreos-${{ github.event.workflow_run.id || inputs.image_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  kola-pivot:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    container:
+      image: quay.io/coreos-assembler/coreos-assembler:latest
+      options: >-
+        --user 0
+        --privileged
+        --device /dev/kvm
+        --device /dev/fuse
+        --tmpfs /tmp
+      volumes:
+        - /var/tmp:/var/tmp
+    steps:
+      - name: Prepare COSA container
+        run: |
+          set -euo pipefail
+          if [[ ! -e /dev/kvm ]]; then
+            echo "::error::Kola QEMU testing requires /dev/kvm."
+            exit 1
+          fi
+
+          dnf install -y nodejs
+
+          kvm_gid=$(stat -c '%g' /dev/kvm)
+          if kvm_group=$(getent group "$kvm_gid"); then
+            kvm_group=${kvm_group%%:*}
+          else
+            kvm_group="runner-kvm-${kvm_gid}"
+            groupadd --gid "$kvm_gid" "$kvm_group"
+          fi
+          usermod --append --groups "$kvm_group" builder
+
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select image build run
+        id: image-run
+        env:
+          INPUT_IMAGE_RUN_ID: ${{ inputs.image_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
+            image_run_id=$(jq -r '.workflow_run.id' "$GITHUB_EVENT_PATH")
+          else
+            image_run_id="$INPUT_IMAGE_RUN_ID"
+          fi
+
+          if [[ ! "$image_run_id" =~ ^[0-9]{1,20}$ ]]; then
+            echo "image_run_id must be a numeric workflow run ID." >&2
+            exit 1
+          fi
+          echo "run_id=$image_run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download exact OCI image artifact
+        uses: actions/download-artifact@v4.1.3
+        with:
+          name: okd-stream-coreos-${{ steps.image-run.outputs.run_id }}
+          path: ${{ runner.temp }}/okd-image
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.image-run.outputs.run_id }}
+
+      - name: Validate OCI image artifact
+        env:
+          OCI_ARCHIVE: ${{ runner.temp }}/okd-image/okd-stream-coreos.ociarchive
+        run: |
+          set -euo pipefail
+          source_archive="$RUNNER_TEMP/okd-image/okd-stream-coreos.oci.tar"
+          if [[ ! -s "$source_archive" ]]; then
+            echo "The selected image run did not provide its OCI archive." >&2
+            exit 1
+          fi
+          mv "$source_archive" "$OCI_ARCHIVE"
+
+          image_info=$(skopeo inspect "oci-archive:$OCI_ARCHIVE")
+          image_arch=$(jq -r '.Architecture' <<< "$image_info")
+          image_version=$(jq -r '.Labels["org.opencontainers.image.version"] // empty' <<< "$image_info")
+          if [[ "$image_arch" != "amd64" ]]; then
+            echo "Expected an amd64 image, got: $image_arch" >&2
+            exit 1
+          fi
+          if [[ -z "$image_version" ]]; then
+            echo "The OCI archive is missing org.opencontainers.image.version." >&2
+            exit 1
+          fi
+
+          echo "Testing OKD image version: $image_version"
+          sha256sum "$OCI_ARCHIVE"
+
+      - name: Checkout pinned CoreOS config
+        uses: actions/checkout@v4
+        with:
+          repository: coreos/rhel-coreos-config
+          ref: ${{ env.COREOS_CONFIG_REF }}
+          path: ${{ env.COREOS_CONFIG_PATH }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Apply local c9s patch
+        working-directory: ${{ env.COREOS_CONFIG_PATH }}
+        run: |
+          set -euo pipefail
+          patch="$GITHUB_WORKSPACE/os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch"
+          git apply --check "$patch"
+          git apply "$patch"
+          git diff --check
+
+      - name: Checkout pinned openshift/os Kola tests
+        uses: actions/checkout@v4
+        with:
+          repository: openshift/os
+          ref: ${{ env.OPENSHIFT_OS_REF }}
+          path: openshift-os
+          persist-credentials: false
+
+      - name: Build SCOS QEMU base
+        run: |
+          set -euo pipefail
+          build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
+          mkdir -p "$build_dir"
+          chown builder:builder "$build_dir"
+          runuser -u builder -- env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            COREOS_CONFIG_PATH="$COREOS_CONFIG_PATH" \
+            /bin/bash -euo pipefail -c '
+              cd "$GITHUB_WORKSPACE/os/base/c9s/build"
+              coreos-assembler init --variant c9s \
+                "$GITHUB_WORKSPACE/$COREOS_CONFIG_PATH"
+              coreos-assembler build
+              coreos-assembler osbuild qemu
+            '
+
+      - name: Disable Zincati for the Kola pivot
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/disable-zincati.ign" <<'EOF'
+          {"ignition":{"version":"3.4.0"},"systemd":{"units":[{"name":"zincati.service","mask":true}]}}
+          EOF
+
+      - name: Run openshift-tagged Kola tests against the pivoted image
+        run: |
+          set -euo pipefail
+          build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
+          results_dir="$GITHUB_WORKSPACE/kola-results"
+          mkdir -p "$results_dir"
+          chown builder:builder "$results_dir"
+          runuser -u builder -- env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            /bin/bash -euo pipefail -c '
+              cd "$GITHUB_WORKSPACE/os/base/c9s/build"
+              coreos-assembler kola --build latest \
+                --output-dir "$GITHUB_WORKSPACE/kola-results" \
+                run --platform qemu --distro scos --tag openshift \
+                --denylist-stream 4.22-c9s \
+                --denylist-test ext.openshift-os.version.rhaos-pkgs-match-openshift \
+                --oscontainer "$RUNNER_TEMP/okd-image/okd-stream-coreos.ociarchive" \
+                --append-ignition "$RUNNER_TEMP/disable-zincati.ign" \
+                --exttest "$GITHUB_WORKSPACE/openshift-os"
+            '
+
+      - name: Upload Kola results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: okd-kola-results-${{ steps.image-run.outputs.run_id }}
+          path: ${{ github.workspace }}/kola-results/
+          if-no-files-found: warn
+          retention-days: 14

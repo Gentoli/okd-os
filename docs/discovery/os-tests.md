@@ -1,57 +1,57 @@
 # OKD CoreOS artifact smoke testing
 
-Reviewed 2026-09-27. This plan targets the final OKD/SCOS node image composed
-from the pinned `openshift/os` source, not the separate SCOS base or the RPMs
-in isolation.
+Reviewed 2026-09-27. This smoke test targets the final OKD/SCOS node image
+composed from the pinned `openshift/os` source, not the separate SCOS base or
+the RPMs in isolation.
 
 ## Recommended base-level test
 
-The minimum useful smoke test is one ephemeral x86_64 VM that installs and boots
-the exact image produced by the build, then reboots from its installed disk.
-It should not need a cluster or cloud account.
+The minimum useful smoke test is one ephemeral x86_64 Kola VM that pivots to the
+exact image produced by the build, reboots into that deployment, and runs the
+tests against the booted OKD image. It should not need a cluster or cloud
+account.
 
-1. Pass the exact build output to the test job, identified by its workflow run
-   and source/RPM inputs; do not resolve a mutable registry tag during testing.
-2. Use a supported CoreOS installation/deployment path to put that image on a
-   fresh VM disk. Remove the installer/live media and boot the installed disk.
-   A live-ISO boot or running the OCI image with Podman does not satisfy this
-   test.
-3. Wait for the guest to finish booting and become reachable through a
-   test-only Ignition/SSH key. Apply a hard timeout and retain the serial
-   console output if boot or access fails.
-4. In the guest, verify the expected OS identity and architecture, that the
-   booted OSTree deployment corresponds to the tested build, and that the
-   OpenShift node packages selected by the pinned manifest are present. At
-   minimum, check `cri-o`, `cri-tools`, `conmon-rs`, `openshift-clients`,
-   `openshift-kubelet`, `openvswitch3.5`, the manifest's credential-provider
-   packages, and their expected executables. Check that systemd is responsive;
-   only require services to be active when they are expected to run before
-   cluster bootstrap.
-5. Reboot the guest from its installed disk, reconnect, and repeat the
-   deployment and package checks. Fail on install/boot/reboot timeout, an
-   unexpected deployment, missing required content, or inability to reach the
-   guest.
-6. Upload serial output and guest diagnostics (journal, OSTree status, OS
-   release, and package inventory) on success and failure.
+1. Pass the exact build output to the test job using the image workflow run ID.
+   The test downloads that run's OCI archive, not a mutable registry tag.
+2. Build a matching SCOS `c9s` QEMU base with COSA. This is Kola's bootable
+   starting disk; the final OCI image itself is not converted to an ISO.
+3. Give Kola the candidate archive with the `.ociarchive` suffix and
+   `--oscontainer`. Kola copies it into the guest, runs
+   `rpm-ostree rebase --experimental
+   ostree-unverified-image:oci-archive:/var/tmp/<archive>`, and reboots. Tests
+   then run against the guest booted from the candidate's installed OSTree
+   deployment.
+4. Mask Zincati in the initial VM's Ignition so its automatic update driver
+   cannot block the test's manual rpm-ostree rebase. Kola supplies the test VM's
+   Ignition and SSH access.
+5. Run the `openshift`-tagged Kola suite for `--distro scos`, using the pinned
+   `openshift/os` external tests. Exclude the `rhaos-pkgs-match-openshift` test:
+   its own description says it is RHCOS-only. The suite includes the
+   Open vSwitch hugetlbfs group assertion, which declares SCOS support.
+6. Apply hard job and Kola timeouts. Upload Kola's serial console, journal, and
+   test reports on success and failure.
+
+The implemented
+[`test-okd-stream-coreos.yml`](../../.github/workflows/test-okd-stream-coreos.yml)
+workflow runs automatically after a successful main-branch image build and can
+also be dispatched manually with an image workflow run ID. The QEMU base uses
+the CoreOS config revision that produced the currently pinned base image; update
+that revision when changing the base-image digest in the image workflow.
 
 ### Artifact and runner prerequisites
 
 The current
 [`build-okd-stream-coreos.yml`](../../.github/workflows/build-okd-stream-coreos.yml)
 composes and publishes the final image, then uploads an OCI archive as a
-workflow artifact. That archive is not a raw, QCOW2, or ISO VM disk. Before
-adding the smoke job, establish the supported way to install/deploy that exact
-composed image onto a VM disk. If the OCI output has no supported direct path,
-the build must also produce a bootable test artifact from the same source and
-package inputs; testing only the SCOS base would miss regressions in the OKD
-compose.
+run-specific workflow artifact. The Kola workflow renames that artifact to
+`.ociarchive` because that suffix activates Kola's local-archive pivot path. A
+separate COSA `c9s` QEMU build is required to boot the test VM; it must use a
+compatible SCOS base, including its SELinux policy.
 
-Run the VM with QEMU/KVM on an x86_64 runner that exposes `/dev/kvm`. This
-repository's [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml)
-already checks for that device before running COSA. Make the smoke job perform
-the same preflight and fail clearly rather than silently skipping the boot
-test. Keep it in the same workflow run as the image build, and pass the
-immutable artifact or digest rather than downloading a later tag. The existing
+Run the VM with QEMU/KVM on an x86_64 runner that exposes `/dev/kvm`. The
+workflow checks for that device and fails rather than silently skipping the
+boot test. The image artifact is retained for 14 days, which also limits the
+manual-dispatch window. The existing
 [`rpm-build.yml` package-install check](../../.github/workflows/rpm-build.yml)
 is useful coverage for RPM artifacts, but it does not boot the composed node
 image.
@@ -71,10 +71,10 @@ contains two image-oriented tests:
   copied unchanged for SCOS. Adapt the assertion only after confirming which
   package version metadata is meaningful for the OKD artifact.
 
-The hugetlbfs group check is a reasonable candidate for the base smoke suite if
-the built image includes Open vSwitch. These tests provide useful assertions,
-but do not by themselves specify the VM installation, reboot, and artifact
-handoff needed for this GitHub Actions test.
+The smoke workflow uses the hugetlbfs group check when running
+`--tag openshift`; the RHAOS package-version check is explicitly denylisted
+because it targets RHCOS. Kola supplies the VM setup, archive pivot, reboot,
+and artifact handoff that the assertions alone do not cover.
 
 ## Additional OpenShift CI coverage
 
