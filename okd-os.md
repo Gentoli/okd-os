@@ -178,7 +178,10 @@ provide the requested `ose-crio-credential-provider` name. It has none of the
 other three `ose-*` provider RPMs either. Thus, the artifact set proves the
 local-repo method works, but is incomplete for this pinned compose; hosting
 these same artifacts would not fix the missing packages. The complete matching
-RPM set must first be produced or obtained.
+RPM set must first be produced or obtained. For a diagnostic retry that omits
+all four provider entries, the compose completes; see the source trace and
+resulting image details in [`rpms.md`](docs/discovery/rpms.md). That output is
+not an unmodified complete node image.
 
 For recurring builds, keep artifact download, repo creation, and compose in the
 same workflow run (or explicitly download those artifacts into the build job).
