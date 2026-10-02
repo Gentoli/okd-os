@@ -40,8 +40,13 @@ jobs:
       image: quay.io/centos/centos:stream${{ matrix.os_version }}
     steps:
       - name: Install Git and Toolchain
+        env:
+          OS_VERSION: ${{ matrix.os_version }}
         run: |
-          dnf install -y dnf-plugins-core epel-release epel-next-release
+          dnf install -y dnf-plugins-core epel-release
+          if [[ "$OS_VERSION" == "9" ]]; then
+            dnf install -y epel-next-release
+          fi
           dnf config-manager --set-enabled crb
           dnf makecache
           dnf install -y \
@@ -236,9 +241,14 @@ jobs:
             component: conmon-rs
     steps:
       - name: Install local RPM build tools
+        env:
+          OS_VERSION: ${{ matrix.os_version }}
         run: |
           dnf install -y epel-release
-          dnf install -y epel-next-release dnf-plugins-core
+          dnf install -y dnf-plugins-core
+          if [[ "$OS_VERSION" == "9" ]]; then
+            dnf install -y epel-next-release
+          fi
           dnf config-manager --set-enabled crb
           dnf makecache
           dnf install -y \
@@ -351,12 +361,17 @@ jobs:
           merge-multiple: true
 
       - name: Install all RPMs
+        env:
+          OS_VERSION: ${{ matrix.os_version }}
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/rpm-test-report"
           printf "RPM and binary version report\n" > \
             "$GITHUB_WORKSPACE/rpm-test-report/rpm-versions.txt"
-          dnf install -y dnf-plugins-core epel-release epel-next-release
+          dnf install -y dnf-plugins-core epel-release
+          if [[ "$OS_VERSION" == "9" ]]; then
+            dnf install -y epel-next-release
+          fi
           dnf config-manager --set-enabled crb
           dnf makecache
           mapfile -d "" rpms < <(

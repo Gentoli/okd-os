@@ -9,7 +9,7 @@ on:
       - Dockerfile
       - Dockerfile.dtk
   schedule:
-    - cron: "17 6 * * *"
+    - cron: "17 6 1,15 * *"
   workflow_dispatch:
     inputs:
       rpm_run_id:
