@@ -1,8 +1,18 @@
-# Building the OKD node image from the published SCOS base
+# Building OKD images from stable release payloads and SCOS bases
 
-## Current target: 4.20
+## Release matrix
 
-The active node-image and Kola workflows now target `openshift/os` commit
+The image workflow scans stable OKD releases 4.20, 4.21, and 4.22, ignoring
+pre-releases, then builds both `c9s` and `c10s` variants. A release payload's
+matching `stream-coreos` image is reused and receives only the kernel/GCC
+overlays. If no matching image exists, the workflow composes the machine image
+from the latest `scos-base:<stream>` image and version-matched RPM artifacts.
+It publishes `stream-coreos:<version>-<stream>` and
+`driver-toolkit:<version>-<stream>`.
+
+## Historical 4.20 compose details
+
+The earlier node-image workflow targeted `openshift/os` commit
 [`847b7d8c3b60f60e86f1de0b7efebb746c75d1bc`](https://github.com/openshift/os/tree/847b7d8c3b60f60e86f1de0b7efebb746c75d1bc)
 from `release-4.20`. This was checked at that exact commit: its
 [`Containerfile`](https://github.com/openshift/os/blob/847b7d8c3b60f60e86f1de0b7efebb746c75d1bc/Containerfile)
@@ -26,7 +36,7 @@ retained as historical findings, not current workflow configuration.
 This research follows [`openshift/os` at
 `3d00d375d491de94fd9dcd0b5440a0efbec3d9db`](https://github.com/openshift/os/tree/3d00d375d491de94fd9dcd0b5440a0efbec3d9db)
 and uses the public base image
-[`ghcr.io/gentoli/okd-os-scos-base:c9s`](https://github.com/Gentoli/okd-os/pkgs/container/okd-os-scos-base/1299816057?tag=c9s).
+`ghcr.io/gentoli/scos-base:c9s`.
 
 ## What this build produces
 
@@ -36,7 +46,7 @@ or compile the RPMs. The base comes from `coreos/rhel-coreos-config`; the
 `openshift/os` build composes already-published RPMs into the final OSTree-based
 container image. The optional extensions image is a separate build.
 
-This repository's `c9s` image is a suitable public base input for that process:
+This repository's `scos-base:c9s` image is a suitable public base input:
 an anonymous `skopeo inspect` returned digest
 `sha256:27818dd2e0f2097df2e6a9c5518ae737a939d416e3f3a352f26fc05a2c1331d1`,
 architecture `amd64`, `com.coreos.osname=scos`, and `com.coreos.stream=c9s`.
@@ -46,14 +56,11 @@ package set. The public image removes the need for an OpenShift pull secret just
 to obtain the base; it does not provide the OpenShift RPM repositories.
 
 This confirms compatibility at the OS-family and image-role level, not
-byte-for-byte equivalence with the private upstream base. The `c9s` tag is
-mutable. This repository's
-[`build-scos-base.yml`](.github/workflows/build-scos-base.yml) defaults
-`config_ref` to `HEAD` and applies a local `fwupd-plugin-flashrom` patch before
-building. Its `c9s-<workflow commit>` tag identifies the workflow-repository
-commit, not necessarily the CoreOS config revision. For reproducibility, pin
-the base by the digest above and record the CoreOS config ref and patch used;
-the workflow publishes only the x86_64 archive.
+byte-for-byte equivalence with the private upstream base. The `c9s` and `c10s`
+tags are mutable. The base workflow builds both variants from
+`coreos/rhel-coreos-config` and labels them with the config commit and workflow
+commit. It publishes the OCI archive as `<stream>-vm` and the QEMU disk as
+`<stream>-qemu-<run-id>`.
 
 ## How the pinned build composes the image
 
@@ -116,11 +123,11 @@ With this repository's public base, override the upstream private `FROM`:
 
 ```sh
 podman build . \
-  --from ghcr.io/gentoli/okd-os-scos-base:c9s \
+  --from ghcr.io/gentoli/scos-base:c9s \
   --secret id=yumrepos,src=/path/to/all.repo \
   -v /etc/pki/ca-trust:/etc/pki/ca-trust:ro \
   --security-opt label=disable \
-  -t localhost/stream-coreos:4.22
+  -t localhost/stream-coreos:4.22-c9s
 ```
 
 Run this from a checkout of the pinned `openshift/os` source. The `all.repo`
@@ -136,7 +143,7 @@ configuration and also supplies its base image input and secrets.
 
 The base image was publicly inspectable and Podman successfully pulled it. I
 downloaded the pinned upstream source archive and ran its `Containerfile` with
-`--from ghcr.io/gentoli/okd-os-scos-base:c9s`. The first attempt stopped before
+`--from ghcr.io/gentoli/scos-base:c9s`. The first attempt stopped before
 the build because this runner has no `/etc/pki/ca-trust` directory. Retrying
 without that host bind mount reached `rpm-ostree` composition, but I supplied
 an empty `yumrepos` secret because the internal repository configuration was
@@ -177,7 +184,7 @@ enabled=1
 gpgcheck=0
 EOF
 podman build . \
-  --from ghcr.io/gentoli/okd-os-scos-base:c9s \
+  --from ghcr.io/gentoli/scos-base:c9s \
   --secret id=yumrepos,src=all.repo \
   --volume /path/to/rpms:/var/tmp/okd-rpm-repo:ro \
   --security-opt label=disable \
@@ -219,18 +226,20 @@ the temporary artifact-download URL or at the ZIP itself.
 
 The
 [`build-okd-stream-coreos.yml`](.github/workflows/build-okd-stream-coreos.yml)
-workflow runs automatically on pushes that change its own workflow file. It
-downloads EL9 artifacts using the `OKD_RPM_RUN_ID` repository variable, generates
-local repo metadata, and composes the pinned `openshift/os` source against the
-pinned SCOS base digest. Set that variable to a successful RPM workflow run ID
-and update it when selecting a newer RPM build. Manual dispatch can instead use
-an explicit successful run ID. The workflows have independent push triggers:
-the image build does not wait for or start the RPM workflow, and retrieves
-cross-run artifacts with `actions/download-artifact`. Builds on `main` publish
-the `4.20` tag; other branches use a branch-and-commit-specific tag so they do
-not overwrite it. Every build also pushes a run-specific tag to
-`ghcr.io/gentoli/okd-stream-coreos` and uploads an OCI archive as a 14-day
-workflow artifact.
+workflow scans stable releases at
+[okd-project/okd/releases](https://github.com/okd-project/okd/releases), ignoring
+pre-releases, then builds a 4.20/4.21/4.22 × c9s/c10s matrix. If a matching
+`stream-coreos` image is present in a release payload, the workflow uses it as
+the input and only applies the kernel/GCC overlay. Otherwise it composes the
+machine image from the latest `scos-base:<stream>` image and the matching RPM
+artifacts. The `OKD_RPM_RUN_ID` repository variable (or manual
+`rpm_run_id` input) is needed only for fallback composes.
+
+The workflow publishes `stream-coreos:<version>-<stream>` and
+`driver-toolkit:<version>-<stream>`. Each image records its release payload,
+source image version/digest/revision, and workflow revision in OCI labels. The
+RPM workflow now builds and tests packages for the same OKD and CentOS Stream
+matrix.
 
 The provider RPMs are correctly named `ecr-credential-provider`,
 `acr-credential-provider`, and `gcr-credential-provider`; their RPM metadata

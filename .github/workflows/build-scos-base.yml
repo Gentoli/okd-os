@@ -50,7 +50,7 @@ jobs:
             exit 1
           fi
 
-          dnf install -y nodejs docker-cli
+          dnf install -y nodejs docker-cli podman
 
           kvm_gid=$(stat -c '%g' /dev/kvm)
           if kvm_group=$(getent group "$kvm_gid"); then
@@ -132,11 +132,35 @@ jobs:
           fi
           echo "path=${images[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Archive SCOS VM image
+      - name: Archive SCOS QEMU disk
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.stream }}-qemu-${{ github.run_id }}
+          path: ${{ steps.qemu-image.outputs.path }}
+          compression-level: 0
+          retention-days: 90
+
+      - name: Locate SCOS OCI archive
+        id: oci-image
+        run: |
+          set -euo pipefail
+          build_dir="$GITHUB_WORKSPACE/os/base/${{ matrix.stream }}/build"
+          mapfile -t archives < <(
+            find "$build_dir/builds" -type f \
+              -path "*/x86_64/scos-*-ostree.x86_64.ociarchive" -print
+          )
+          if (( ${#archives[@]} != 1 )); then
+            echo "Expected one x86_64 SCOS OCI archive," \
+              "found ${#archives[@]}." >&2
+            exit 1
+          fi
+          echo "path=${archives[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Archive SCOS VM OCI image
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.stream }}-vm
-          path: ${{ steps.qemu-image.outputs.path }}
+          path: ${{ steps.oci-image.outputs.path }}
           compression-level: 0
           retention-days: 90
 
@@ -152,21 +176,9 @@ jobs:
           STREAM: ${{ matrix.stream }}
         run: |
           set -euo pipefail
-          build_dir="$GITHUB_WORKSPACE/os/base/${STREAM}/build"
-          cd "$build_dir"
           image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/scos-base"
-          mapfile -t archives < <(
-            find builds -type f \
-              -path "*/x86_64/scos-*-ostree.x86_64.ociarchive" -print
-          )
-          if (( ${#archives[@]} != 1 )); then
-            echo "Expected one x86_64 SCOS OCI archive," \
-              "found ${#archives[@]}." >&2
-            exit 1
-          fi
-
           skopeo copy \
-            "oci-archive:${archives[0]}" \
+            "oci-archive:${{ steps.oci-image.outputs.path }}" \
             "containers-storage:localhost/scos-base-source:${STREAM}"
           cat > "$RUNNER_TEMP/Containerfile" <<EOF
           FROM localhost/scos-base-source:${STREAM}

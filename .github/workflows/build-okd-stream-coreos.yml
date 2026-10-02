@@ -2,95 +2,277 @@ name: Build and Publish OKD Stream CoreOS
 
 on:
   push:
+    branches:
+      - main
     paths:
       - .github/workflows/build-okd-stream-coreos.yml
+      - Dockerfile
+      - Dockerfile.dtk
+  schedule:
+    - cron: "17 6 * * *"
   workflow_dispatch:
     inputs:
       rpm_run_id:
-        description: Successful RPM Build Reproduction run ID
-        required: true
-        type: string
-      image_tag:
-        description: Additional mutable GHCR image tag
-        required: true
-        default: '4.20'
+        description: >-
+          Successful RPM Build Reproduction run ID used for fallback builds
+        required: false
         type: string
 
 permissions:
-  actions: read
   contents: read
-  packages: write
 
 concurrency:
-  group: build-okd-stream-coreos
+  group: build-okd-stream-coreos-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build-and-publish:
+  release-matrix:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    env:
-      RPM_RUN_ID: ${{ inputs.rpm_run_id || vars.OKD_RPM_RUN_ID }}
-      IMAGE_TAG: ${{ inputs.image_tag }}
-      BASE_IMAGE: ghcr.io/gentoli/okd-os-scos-base
-      BASE_IMAGE_DIGEST_HEAD: 27818dd2e0f2097df2e6a9c5518ae737
-      BASE_IMAGE_DIGEST_TAIL: a939d416e3f3a352f26fc05a2c1331d1
-      OS_REF: 847b7d8c3b60f60e86f1de0b7efebb746c75d1bc
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.releases.outputs.matrix }}
     steps:
-      - name: Validate inputs and select image tag
+      - name: Find the latest stable OKD release payloads
+        id: releases
         run: |
           set -euo pipefail
-
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            if [[ ! "$RPM_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
-              echo "rpm_run_id must be a numeric workflow run ID." >&2
-              exit 1
+          releases='[]'
+          for page in $(seq 1 20); do
+            page_json=$(curl -fsSL --get \
+              https://api.github.com/repos/okd-project/okd/releases \
+              --data-urlencode per_page=100 \
+              --data-urlencode "page=${page}")
+            page_releases=$(jq -c '
+              [
+                .[]
+                | select(.draft == false and .prerelease == false)
+                | select(
+                    .tag_name
+                    | test("^4\\.(20|21|22)\\.[0-9]+-okd-scos\\.[0-9]+$")
+                  )
+                | (.body
+                    | try capture(
+                        "Pull From:\\s*(?<image>[^[:space:]]+)"
+                      ).image
+                    catch ""
+                  ) as $image
+                | select(
+                    $image
+                    | test("^quay\\.io/okd/scos-release@sha256:[0-9a-f]{64}$")
+                  )
+                | {
+                    version: (
+                      .tag_name
+                      | capture("^(?<version>4\\.(20|21|22))\\.").version
+                    ),
+                    tag: .tag_name,
+                    image: $image,
+                    published_at: .published_at
+                  }
+              ]
+            ' <<< "$page_json")
+            releases=$(jq -cn \
+              --argjson old "$releases" \
+              --argjson page "$page_releases" '$old + $page')
+            if jq -e '
+              map(.version) | unique | length == 3
+            ' <<< "$releases" >/dev/null; then
+              break
             fi
-            image_tag="${IMAGE_TAG:-4.20}"
-          elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            image_tag="4.20"
-          else
-            branch_tag=$(
-              printf '%s' "$GITHUB_REF_NAME" |
-                tr '[:upper:]' '[:lower:]' |
-                sed -E 's/[^a-z0-9_.-]+/-/g; s/^[^a-z0-9_]+//; s/[-.]+$//' |
-                cut -c1-60
-            )
-            image_tag="${branch_tag:-branch}-${GITHUB_SHA:0:12}"
-          fi
+            if [[ $(jq 'length' <<< "$page_json") -lt 100 ]]; then
+              break
+            fi
+          done
 
-          if [[ ! "$image_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$ ]]; then
-            echo "image_tag must be a valid container tag" \
-              "of at most 80 characters." >&2
+          release_count=$(jq -r 'map(.version) | unique | length' \
+            <<< "$releases")
+          if [[ "$release_count" -ne 3 ]]; then
+            echo "Could not find stable release payloads for" \
+              "4.20, 4.21, and 4.22." >&2
             exit 1
           fi
-          echo "IMAGE_TAG=$image_tag" >> "$GITHUB_ENV"
+          release_commits='{}'
+          for version in 4.20 4.21 4.22; do
+            release_tag=$(jq -r --arg version "$version" '
+              map(select(.version == $version))
+              | sort_by(.published_at)
+              | last
+              | .tag
+            ' <<< "$releases")
+            commit_url=https://api.github.com/repos/okd-project/okd/commits
+            release_commit=$(curl -fsSL "${commit_url}/${release_tag}" |
+              jq -r '.sha')
+            release_commits=$(jq -cn \
+              --argjson old "$release_commits" \
+              --arg version "$version" \
+              --arg commit "$release_commit" \
+              '$old + {($version): $commit}')
+          done
+          matrix=$(jq -c \
+            --argjson releases "$releases" \
+            --argjson commits "$release_commits" '
+            ["4.20", "4.21", "4.22"] as $versions
+            | [
+                $versions[] as $version
+                | (
+                    $releases
+                    | map(select(.version == $version))
+                    | sort_by(.published_at)
+                    | last
+                  ) as $release
+                | ["c9s", "c10s"][]
+                | . as $base
+                | {
+                    version: $version,
+                    release_tag: $release.tag,
+                    release_image: $release.image,
+                    release_commit: $commits[$version],
+                    base: $base,
+                    os_major: ($base | capture("c(?<major>[0-9]+)s").major),
+                    repo_version: (
+                      if $base == "c10s" then "10.0"
+                      elif $version == "4.20" then "9.6"
+                      elif $version == "4.21" then "9.7"
+                      else "9.8"
+                      end
+                    )
+                  }
+              ]
+          ' <<< "$releases")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
-      - name: Select RPM artifact run ID
+  build-and-publish:
+    needs: release-matrix
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.release-matrix.outputs.matrix) }}
+    env:
+      RPM_RUN_ID: ${{ inputs.rpm_run_id || vars.OKD_RPM_RUN_ID }}
+      OKD_VERSION: ${{ matrix.version }}
+      RELEASE_TAG: ${{ matrix.release_tag }}
+      RELEASE_IMAGE: ${{ matrix.release_image }}
+      RELEASE_COMMIT: ${{ matrix.release_commit }}
+      BASE_STREAM: ${{ matrix.base }}
+      OS_MAJOR: ${{ matrix.os_major }}
+      REPO_VERSION: ${{ matrix.repo_version }}
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install oc
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: "4"
+
+      - name: Install image and RPM repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            createrepo-c podman skopeo
+
+      - name: Resolve release images
+        id: source-images
+        run: |
+          set -euo pipefail
+          inspect_image() {
+            local image_ref=$1
+            local inspection
+            inspection=$(skopeo inspect "docker://${image_ref}")
+            jq -cn \
+              --argjson image "$inspection" \
+              '{
+                digest: $image.Digest,
+                stream: ($image.Labels["com.coreos.stream"] // ""),
+                version: (
+                  $image.Labels["org.opencontainers.image.version"]
+                  // $image.Labels["com.coreos.buildid"]
+                  // "unknown"
+                ),
+                revision: (
+                  $image.Labels["org.opencontainers.image.revision"]
+                  // $image.Labels["io.openshift.build.commit.id"]
+                  // "unknown"
+                )
+              }'
+          }
+
+          stream_image=$(oc adm release info \
+            --image-for stream-coreos "$RELEASE_IMAGE" 2>/dev/null || true)
+          dtk_image=$(oc adm release info \
+            --image-for driver-toolkit "$RELEASE_IMAGE" 2>/dev/null || true)
+          compose_from_base=false
+          stream_info='{}'
+          dtk_info='{}'
+
+          if [[ -n "$stream_image" ]]; then
+            stream_info=$(inspect_image "$stream_image")
+            stream_base=$(jq -r '.stream' <<< "$stream_info")
+            if [[ "$stream_base" != "$BASE_STREAM" ]]; then
+              echo "Release stream-coreos is for $stream_base," \
+                "not $BASE_STREAM."
+              stream_image=""
+              stream_info='{}'
+            fi
+          fi
+          if [[ -z "$stream_image" ]]; then
+            compose_from_base=true
+          fi
+
+          if [[ -n "$dtk_image" ]]; then
+            dtk_info=$(inspect_image "$dtk_image")
+            dtk_base=$(jq -r '.stream' <<< "$dtk_info")
+            if [[ -n "$dtk_base" && "$dtk_base" != "$BASE_STREAM" ]]; then
+              echo "Release driver-toolkit is for $dtk_base, not $BASE_STREAM."
+              dtk_image=""
+              dtk_info='{}'
+            elif [[ -z "$dtk_base" && -z "$stream_image" ]]; then
+              dtk_image=""
+              dtk_info='{}'
+            fi
+          fi
+          if [[ -z "$dtk_image" && -n "$stream_image" ]]; then
+            dtk_image=$stream_image
+            dtk_info=$stream_info
+          fi
+          echo "stream_image=$stream_image" >> "$GITHUB_OUTPUT"
+          echo "stream_info=$stream_info" >> "$GITHUB_OUTPUT"
+          echo "dtk_image=$dtk_image" >> "$GITHUB_OUTPUT"
+          echo "dtk_info=$dtk_info" >> "$GITHUB_OUTPUT"
+          echo "compose=$compose_from_base" >> "$GITHUB_OUTPUT"
+
+      - name: Validate RPM artifact run ID
         id: rpm-run
+        if: steps.source-images.outputs.compose == 'true'
         run: |
           set -euo pipefail
           if [[ ! "$RPM_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
-            echo "Set rpm_run_id or the OKD_RPM_RUN_ID repository variable" \
-              "to a successful RPM workflow run ID." >&2
+            echo "A numeric rpm_run_id or OKD_RPM_RUN_ID is required when" \
+              "the payload has no matching stream-coreos image." >&2
             exit 1
           fi
           echo "run_id=$RPM_RUN_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Install Podman and RPM repository tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y podman createrepo-c
-
-      - name: Checkout pinned openshift/os source
+      - name: Checkout matching openshift/os source
+        if: steps.source-images.outputs.compose == 'true'
         uses: actions/checkout@v4
         with:
           repository: openshift/os
-          ref: ${{ env.OS_REF }}
+          ref: release-${{ matrix.version }}
           path: openshift-os
           persist-credentials: false
 
       - name: Allow provider RPM package names in the local repo
+        if: steps.source-images.outputs.compose == 'true'
         working-directory: openshift-os
         run: |
           set -euo pipefail
@@ -105,17 +287,21 @@ jobs:
           sed -i "s/ose-gcp-gcr-\\*'/${new}/" "$script"
           grep -F "includepkgs=" "$script"
 
-      - name: Download RPM build artifacts
+      - name: Download matching RPM artifacts
+        if: steps.source-images.outputs.compose == 'true'
         uses: actions/download-artifact@v4.1.3
         with:
-          pattern: '*-rpms-*el9'
+          pattern: "*-rpms-okd${{ matrix.version }}-el${{ matrix.os_major }}"
           path: ${{ runner.temp }}/okd-rpms
           merge-multiple: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           run-id: ${{ steps.rpm-run.outputs.run_id }}
 
-      - name: Prepare local RPM repository
+      - name: Prepare the local RPM repository
+        if: steps.source-images.outputs.compose == 'true'
+        env:
+          RPM_REPO_VERSION: ${{ matrix.repo_version }}
         run: |
           set -euo pipefail
           rpm_dir="$RUNNER_TEMP/okd-rpms"
@@ -123,10 +309,13 @@ jobs:
             find "$rpm_dir" -type f -name '*.rpm' -print0
           )
           if (( ${#rpms[@]} == 0 )); then
-            echo "The selected run has no EL9 RPM artifacts." >&2
+            echo "The selected run has no matching EL${OS_MAJOR} RPMs." >&2
             exit 1
           fi
           for package in \
+            cri-o \
+            cri-tools \
+            conmon-rs \
             ecr-credential-provider \
             acr-credential-provider \
             gcr-credential-provider; do
@@ -138,52 +327,208 @@ jobs:
           done
 
           createrepo_c "$rpm_dir"
-          cat > "$RUNNER_TEMP/yumrepos" <<'EOF'
-          [rhel-9.6-server-ose-4.20]
+          cat > "$RUNNER_TEMP/yumrepos" <<EOF
+          [rhel-${RPM_REPO_VERSION}-server-ose-${OKD_VERSION}]
           name=OpenShift RPM build artifacts
           baseurl=file:///var/tmp/okd-rpm-repo
           enabled=1
           gpgcheck=0
           EOF
 
-      - name: Compose OKD Stream CoreOS image
-        run: |
-          set -euo pipefail
-          base_ref="${BASE_IMAGE}@sha256:"
-          base_ref+="${BASE_IMAGE_DIGEST_HEAD}${BASE_IMAGE_DIGEST_TAIL}"
-          local_image="localhost/okd-stream-coreos:${IMAGE_TAG}"
-          podman build \
-            --from "$base_ref" \
-            --secret id=yumrepos,src="$RUNNER_TEMP/yumrepos" \
-            --volume "$RUNNER_TEMP/okd-rpms:/var/tmp/okd-rpm-repo:ro" \
-            --security-opt label=disable \
-            --tag "$local_image" \
-            "$GITHUB_WORKSPACE/openshift-os"
-          echo "LOCAL_IMAGE=$local_image" >> "$GITHUB_ENV"
-
-      - name: Publish image to GHCR
+      - name: Log in to GHCR
+        if: steps.source-images.outputs.compose == 'true'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/okd-stream-coreos"
-          run_tag="${IMAGE_TAG}-rpm${RPM_RUN_ID}-${GITHUB_SHA:0:12}"
           printf '%s' "$GHCR_TOKEN" |
             podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          podman tag "$LOCAL_IMAGE" "${image_ref}:${IMAGE_TAG}"
-          podman tag "$LOCAL_IMAGE" "${image_ref}:${run_tag}"
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            podman tag "$LOCAL_IMAGE" "${image_ref}:latest"
+
+      - name: Compose the machine image from the latest SCOS base
+        id: compose
+        if: steps.source-images.outputs.compose == 'true'
+        env:
+          IMAGE_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          BASE_IMAGE="ghcr.io/${IMAGE_OWNER,,}/scos-base:${BASE_STREAM}"
+          base_info=$(skopeo inspect "docker://${BASE_IMAGE}")
+          base_digest=$(jq -r '.Digest' <<< "$base_info")
+          base_revision=$(jq -r \
+            '.Labels["org.opencontainers.image.revision"] // "unknown"' \
+            <<< "$base_info")
+          os_revision=$(git -C "$GITHUB_WORKSPACE/openshift-os" rev-parse HEAD)
+          image_ref="localhost/stream-coreos:${OKD_VERSION}-${BASE_STREAM}"
+          podman build \
+            --from "$BASE_IMAGE" \
+            --label "org.opencontainers.image.version=${OKD_VERSION}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.base.name=${BASE_IMAGE}" \
+            --label "org.opencontainers.image.base.digest=${base_digest}" \
+            --label "io.okd.source.scos-base.revision=${base_revision}" \
+            --label "io.okd.source.openshift-os.revision=${os_revision}" \
+            --label "io.okd.source.rpm-build.run=${RPM_RUN_ID}" \
+            --secret id=yumrepos,src="$RUNNER_TEMP/yumrepos" \
+            --volume "$RUNNER_TEMP/okd-rpms:/var/tmp/okd-rpm-repo:ro" \
+            --security-opt label=disable \
+            --tag "$image_ref" \
+            "$GITHUB_WORKSPACE/openshift-os"
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Select overlay source images
+        id: overlay-inputs
+        env:
+          STREAM_IMAGE: ${{ steps.source-images.outputs.stream_image }}
+          DTK_IMAGE: ${{ steps.source-images.outputs.dtk_image }}
+          COMPOSED_IMAGE: ${{ steps.compose.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          stream_image="${STREAM_IMAGE:-$COMPOSED_IMAGE}"
+          dtk_image="${DTK_IMAGE:-$stream_image}"
+          if [[ -z "$stream_image" || -z "$dtk_image" ]]; then
+            echo "Could not select source images for the kernel/GCC overlays." \
+              >&2
+            exit 1
           fi
-          podman push "${image_ref}:${IMAGE_TAG}"
-          podman push "${image_ref}:${run_tag}"
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            podman push "${image_ref}:latest"
+          echo "stream_image=$stream_image" >> "$GITHUB_OUTPUT"
+          echo "dtk_image=$dtk_image" >> "$GITHUB_OUTPUT"
+
+      - name: Select kernel package version
+        id: kernel
+        run: |
+          set -euo pipefail
+          kernel_version=$(
+            podman run --rm --pull=always \
+              "quay.io/centos/centos:stream${OS_MAJOR}" \
+              bash -ec '
+                dnf install -y dnf-plugins-core >/dev/null 2>&1
+                dnf repoquery --latest-limit=1 \
+                  --qf "%{VERSION}-%{RELEASE}" kernel-core
+              '
+          )
+          kernel_pattern="^[0-9][A-Za-z0-9._+-]*\\.el${OS_MAJOR}$"
+          if [[ ! "$kernel_version" =~ $kernel_pattern ]]; then
+            echo "Could not resolve a valid EL${OS_MAJOR} kernel version." >&2
+            exit 1
           fi
-          {
-            echo "Published \`${image_ref}:${IMAGE_TAG}\`"
-            echo "Immutable run tag: \`${image_ref}:${run_tag}\`"
-            if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-              echo "Default smoke-test tag: \`${image_ref}:latest\`"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "version=$kernel_version" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish stream-coreos
+        env:
+          BASE_IMAGE: ${{ steps.overlay-inputs.outputs.stream_image }}
+          KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+          SOURCE_INFO: ${{ steps.source-images.outputs.stream_info }}
+          SOURCE_IMAGE_REF: ${{ steps.overlay-inputs.outputs.stream_image }}
+          COMPOSE: ${{ steps.source-images.outputs.compose }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          image_ref="ghcr.io/${owner}/stream-coreos"
+          image_tag="${OKD_VERSION}-${BASE_STREAM}"
+          source_digest=$(jq -r '.digest // "unknown"' <<< "$SOURCE_INFO")
+          source_version=$(jq -r '.version // "unknown"' <<< "$SOURCE_INFO")
+          source_revision=$(jq -r '.revision // "unknown"' <<< "$SOURCE_INFO")
+          if [[ "$COMPOSE" == true ]]; then
+            source_info=$(
+              skopeo inspect "containers-storage:${SOURCE_IMAGE_REF}"
+            )
+            source_digest=$(jq -r '.Digest // "unknown"' <<< "$source_info")
+            source_version=$(jq -r \
+              '.Labels["org.opencontainers.image.version"] // "unknown"' \
+              <<< "$source_info")
+            source_revision=$(jq -r \
+              '.Labels["org.opencontainers.image.revision"] // "unknown"' \
+              <<< "$source_info")
+          fi
+          [[ "$source_version" != "unknown" ]] || source_version=$RELEASE_TAG
+          if [[ "$source_revision" == "unknown" ]]; then
+            source_revision=$RELEASE_COMMIT
+          fi
+
+          source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          labels=(
+            --label "org.opencontainers.image.source=${source_url}"
+            --label "org.opencontainers.image.version=${OKD_VERSION}"
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}"
+            --label "org.opencontainers.image.base.name=${SOURCE_IMAGE_REF}"
+            --label "org.opencontainers.image.base.digest=${source_digest}"
+            --label "io.okd.source.release.tag=${RELEASE_TAG}"
+            --label "io.okd.source.release.payload=${RELEASE_IMAGE}"
+            --label "io.okd.source.release.revision=${RELEASE_COMMIT}"
+            --label "io.okd.source.image.version=${source_version}"
+            --label "io.okd.source.image.revision=${source_revision}"
+            --label "io.okd.source.image.digest=${source_digest}"
+            --label "io.okd.source.base.stream=${BASE_STREAM}"
+            --label "io.okd.source.kernel.version=${KERNEL_VERSION}"
+          )
+          printf '%s' "$GHCR_TOKEN" |
+            podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          podman build \
+            --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
+            --build-arg "VERSION=${KERNEL_VERSION}" \
+            --build-arg "STREAM_MAJOR=${OS_MAJOR}" \
+            "${labels[@]}" \
+            --file Dockerfile \
+            --tag "${image_ref}:${image_tag}" \
+            .
+          podman push "${image_ref}:${image_tag}"
+
+      - name: Build and publish driver-toolkit
+        env:
+          BASE_IMAGE: ${{ steps.overlay-inputs.outputs.dtk_image }}
+          KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+          SOURCE_INFO: ${{ steps.source-images.outputs.dtk_info }}
+          SOURCE_IMAGE_REF: ${{ steps.overlay-inputs.outputs.dtk_image }}
+          COMPOSE: ${{ steps.source-images.outputs.compose }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          image_ref="ghcr.io/${owner}/driver-toolkit"
+          image_tag="${OKD_VERSION}-${BASE_STREAM}"
+          source_digest=$(jq -r '.digest // "unknown"' <<< "$SOURCE_INFO")
+          source_version=$(jq -r '.version // "unknown"' <<< "$SOURCE_INFO")
+          source_revision=$(jq -r '.revision // "unknown"' <<< "$SOURCE_INFO")
+          if [[ "$COMPOSE" == true && "$SOURCE_INFO" == '{}' ]]; then
+            source_info=$(
+              skopeo inspect "containers-storage:${SOURCE_IMAGE_REF}"
+            )
+            source_digest=$(jq -r '.Digest // "unknown"' <<< "$source_info")
+            source_version=$(jq -r \
+              '.Labels["org.opencontainers.image.version"] // "unknown"' \
+              <<< "$source_info")
+            source_revision=$(jq -r \
+              '.Labels["org.opencontainers.image.revision"] // "unknown"' \
+              <<< "$source_info")
+          fi
+          [[ "$source_version" != "unknown" ]] || source_version=$RELEASE_TAG
+          if [[ "$source_revision" == "unknown" ]]; then
+            source_revision=$RELEASE_COMMIT
+          fi
+
+          source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          labels=(
+            --label "org.opencontainers.image.source=${source_url}"
+            --label "org.opencontainers.image.version=${OKD_VERSION}"
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}"
+            --label "org.opencontainers.image.base.name=${SOURCE_IMAGE_REF}"
+            --label "org.opencontainers.image.base.digest=${source_digest}"
+            --label "io.okd.source.release.tag=${RELEASE_TAG}"
+            --label "io.okd.source.release.payload=${RELEASE_IMAGE}"
+            --label "io.okd.source.release.revision=${RELEASE_COMMIT}"
+            --label "io.okd.source.image.version=${source_version}"
+            --label "io.okd.source.image.revision=${source_revision}"
+            --label "io.okd.source.image.digest=${source_digest}"
+            --label "io.okd.source.base.stream=${BASE_STREAM}"
+            --label "io.okd.source.kernel.version=${KERNEL_VERSION}"
+          )
+          podman build \
+            --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
+            --build-arg "VERSION=${KERNEL_VERSION}" \
+            --build-arg "STREAM_MAJOR=${OS_MAJOR}" \
+            "${labels[@]}" \
+            --file Dockerfile.dtk \
+            --tag "${image_ref}:${image_tag}" \
+            .
+          podman push "${image_ref}:${image_tag}"
