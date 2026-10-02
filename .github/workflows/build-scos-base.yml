@@ -6,22 +6,14 @@ on:
       - main
     paths:
       - .github/workflows/build-scos-base.yml
-      - os/base/c9s/patches/**
+      - os/base/**
   workflow_dispatch:
     inputs:
-      tag:
-        description: Additional GHCR image tag
-        required: true
-        default: c9s
-        type: string
       config_ref:
         description: Branch, tag, or commit of coreos/rhel-coreos-config
         required: true
         default: HEAD
         type: string
-
-env:
-  COREOS_CONFIG_PATH: os/base/c9s/source
 
 permissions:
   contents: read
@@ -33,7 +25,12 @@ concurrency:
 
 jobs:
   build-and-push:
+    name: Build ${{ matrix.stream }} base
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stream: [c9s, c10s]
     container:
       image: quay.io/coreos-assembler/coreos-assembler:latest
       options: >-
@@ -74,39 +71,51 @@ jobs:
         with:
           repository: coreos/rhel-coreos-config
           ref: ${{ inputs.config_ref != 'HEAD' && inputs.config_ref || '' }}
-          path: ${{ env.COREOS_CONFIG_PATH }}
+          path: os/base/${{ matrix.stream }}/source
           submodules: recursive
           persist-credentials: false
 
-      - name: Apply local c9s patches
-        working-directory: ${{ env.COREOS_CONFIG_PATH }}
+      - name: Apply local SCOS patches
+        env:
+          STREAM: ${{ matrix.stream }}
         run: |
           set -euo pipefail
+          config_path="$GITHUB_WORKSPACE/os/base/${STREAM}/source"
           patch="$GITHUB_WORKSPACE/os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch"
-          git apply --check "$patch"
-          git apply "$patch"
-          git diff --check
+          if git -C "$config_path" apply --check "$patch"; then
+            git -C "$config_path" apply "$patch"
+            git -C "$config_path" diff --check
+          elif [[ "$STREAM" == "c9s" ]]; then
+            echo "The required c9s patch no longer applies." >&2
+            exit 1
+          else
+            echo "The c9s compatibility patch does not apply to $STREAM;" \
+              "continuing without it."
+          fi
+          config_revision=$(git -C "$config_path" rev-parse HEAD)
+          echo "COREOS_CONFIG_REVISION=$config_revision" >> "$GITHUB_ENV"
 
-      - name: Build c9s base image
+      - name: Build SCOS base image
         run: |
           set -euo pipefail
-          build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
+          build_dir="$GITHUB_WORKSPACE/os/base/${{ matrix.stream }}/build"
           mkdir -p "$build_dir"
           chown builder:builder "$build_dir"
           runuser -u builder -- env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
-            COREOS_CONFIG_PATH="$COREOS_CONFIG_PATH" \
+            COREOS_CONFIG_PATH="os/base/${{ matrix.stream }}/source" \
+            COREOS_STREAM="${{ matrix.stream }}" \
             /bin/bash -euo pipefail -c '
-              cd "$GITHUB_WORKSPACE/os/base/c9s/build"
-              coreos-assembler init --variant c9s \
+              cd "$GITHUB_WORKSPACE/os/base/$COREOS_STREAM/build"
+              coreos-assembler init --variant "$COREOS_STREAM" \
                 "$GITHUB_WORKSPACE/$COREOS_CONFIG_PATH"
               coreos-assembler build
             '
 
-      - name: Build c9s QEMU image
+      - name: Build SCOS QEMU image
         id: qemu-image
         run: |
           set -euo pipefail
-          build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
+          build_dir="$GITHUB_WORKSPACE/os/base/${{ matrix.stream }}/build"
           runuser -u builder -- /bin/bash -euo pipefail -c '
             cd "$1"
             coreos-assembler osbuild qemu
@@ -123,10 +132,10 @@ jobs:
           fi
           echo "path=${images[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Archive c9s QEMU image
+      - name: Archive SCOS VM image
         uses: actions/upload-artifact@v4
         with:
-          name: scos-c9s-qemu-${{ github.run_id }}
+          name: ${{ matrix.stream }}-vm
           path: ${{ steps.qemu-image.outputs.path }}
           compression-level: 0
           retention-days: 90
@@ -138,18 +147,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish c9s base image
+      - name: Publish SCOS base image
         env:
-          IMAGE_TAG: ${{ inputs.tag || 'c9s' }}
+          STREAM: ${{ matrix.stream }}
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/os/base/c9s/build"
-          image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/okd-os-scos-base"
-          immutable_tag="c9s-${GITHUB_SHA:0:12}"
-          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-            echo "Invalid GHCR image tag: $IMAGE_TAG" >&2
-            exit 1
-          fi
+          build_dir="$GITHUB_WORKSPACE/os/base/${STREAM}/build"
+          cd "$build_dir"
+          image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/scos-base"
           mapfile -t archives < <(
             find builds -type f \
               -path "*/x86_64/scos-*-ostree.x86_64.ociarchive" -print
@@ -162,7 +167,21 @@ jobs:
 
           skopeo copy \
             "oci-archive:${archives[0]}" \
-            "docker://${image_ref}:${immutable_tag}"
-          skopeo copy \
-            "oci-archive:${archives[0]}" \
-            "docker://${image_ref}:${IMAGE_TAG}"
+            "containers-storage:localhost/scos-base-source:${STREAM}"
+          cat > "$RUNNER_TEMP/Containerfile" <<EOF
+          FROM localhost/scos-base-source:${STREAM}
+          ARG COREOS_CONFIG_SOURCE
+          LABEL org.opencontainers.image.source="\${COREOS_CONFIG_SOURCE}"
+          LABEL org.opencontainers.image.version="${STREAM}"
+          LABEL org.opencontainers.image.revision="${COREOS_CONFIG_REVISION}"
+          LABEL io.okd.source.workflow.revision="${GITHUB_SHA}"
+          EOF
+          config_source=https://github.com/coreos/rhel-coreos-config
+          podman build \
+            --build-arg "COREOS_CONFIG_SOURCE=$config_source" \
+            --tag "${image_ref}:${STREAM}" \
+            --file "$RUNNER_TEMP/Containerfile" \
+            "$RUNNER_TEMP"
+          podman push --format oci \
+            "${image_ref}:${STREAM}" \
+            "docker://${image_ref}:${STREAM}"
