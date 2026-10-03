@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       mirrors:
-        description: JSON array of selected RPM mirrors requiring synchronization
+        description: RPM mirrors selected for synchronization
         required: true
         type: string
 
@@ -36,26 +36,29 @@ jobs:
         id: branches
         uses: actions/github-script@v9
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           MIRRORS: ${{ inputs.mirrors }}
         with:
           script: |
             const { execFileSync } = require("node:child_process");
             const mirrors = JSON.parse(process.env.MIRRORS);
             const repository = process.env.GITHUB_REPOSITORY;
-            const [owner, repo] = repository.split("/");
             const workspace = process.env.GITHUB_WORKSPACE;
             const mirrorUrl = `https://github.com/${repository}.git`;
             const prepared = [];
             if (mirrors.length !== 1) {
-              throw new Error("Mirror preparation expects exactly one package target.");
+              throw new Error(
+                "Mirror preparation expects exactly one package target.",
+              );
             }
 
-            function git(args) {
+            function git(args, extraEnv = {}) {
               try {
                 return execFileSync("git", args, {
                   cwd: workspace,
                   encoding: "utf8",
                   stdio: ["ignore", "pipe", "pipe"],
+                  env: { ...process.env, ...extraEnv },
                 }).trimEnd();
               } catch (error) {
                 const detail = error.stderr?.toString() ?? error.message;
@@ -81,20 +84,31 @@ jobs:
                 baseSha = targetOutput.split(/\s+/)[0];
               } else {
                 try {
-                  await github.rest.git.createRef({
-                    owner,
-                    repo,
-                    ref: targetRef,
-                    sha: sourceSha,
+                  const authHeader = `AUTHORIZATION: basic ${Buffer.from(
+                    `x-access-token:${process.env.GITHUB_TOKEN}`,
+                  ).toString("base64")}`;
+                  git([
+                    "push", "--quiet", mirrorUrl,
+                    `${sourceRef}:${targetRef}`,
+                  ], {
+                    GIT_CONFIG_COUNT: "1",
+                    GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+                    GIT_CONFIG_VALUE_0: authHeader,
                   });
                   baseSha = sourceSha;
                 } catch (error) {
-                  const current = git(["ls-remote", "--heads", mirrorUrl, targetRef]);
+                  const current = git([
+                    "ls-remote", "--heads", mirrorUrl, targetRef,
+                  ]);
                   if (!current) throw error;
                   baseSha = current.split(/\s+/)[0];
                 }
               }
-              prepared.push({ ...mirror, source_sha: sourceSha, base_sha: baseSha });
+              prepared.push({
+                ...mirror,
+                source_sha: sourceSha,
+                base_sha: baseSha,
+              });
             }
             core.setOutput("plan", JSON.stringify(prepared));
             core.setOutput("target_branch", prepared[0].target_branch);
@@ -125,7 +139,9 @@ jobs:
             const path = require("node:path");
             const mirrors = JSON.parse(process.env.MIRROR_PLAN);
             if (mirrors.length !== 1) {
-              throw new Error("Mirror sync expects exactly one package target.");
+              throw new Error(
+                "Mirror sync expects exactly one package target.",
+              );
             }
             const repository = process.env.GITHUB_REPOSITORY;
             const workspace = process.env.GITHUB_WORKSPACE;
@@ -161,13 +177,13 @@ jobs:
                 `refs/heads/${mirror.target_branch}:${targetRef}`,
               ]);
               const baseSha = git(["rev-parse", targetRef]);
-              const mirrorPlan = mirrors.find((item) => item.id === mirror.id);
               if (
-                baseSha !== mirrorPlan.base_sha ||
-                git(["rev-parse", sourceRef]) !== mirrorPlan.source_sha
+                baseSha !== mirror.base_sha ||
+                git(["rev-parse", sourceRef]) !== mirror.source_sha
               ) {
                 throw new Error(
-                  `RPM source branches changed during setup for ${mirror.target_branch}.`,
+                  `RPM source branches changed during setup for ` +
+                    `${mirror.target_branch}.`,
                 );
               }
               const worktree = path.join(
@@ -188,8 +204,8 @@ jobs:
                 source_ref: sourceRef,
                 mirror_remote: mirrorRemote,
                 target_ref: targetRef,
-                base_sha: mirrorPlan.base_sha,
-                source_sha: mirrorPlan.source_sha,
+                base_sha: mirror.base_sha,
+                source_sha: mirror.source_sha,
                 worktree,
                 context_path: contextPath,
               };
@@ -221,14 +237,18 @@ jobs:
                 "utf8",
               ),
             );
-            const instruction = `${process.env.GITHUB_WORKSPACE}/.github/prompts/rpm-mirror-maintenance.md`;
+            const instruction = require("node:path").join(
+              process.env.GITHUB_WORKSPACE,
+              ".github/prompts/rpm-mirror-maintenance.md",
+            );
             for (const mirror of mirrors) {
               execFileSync("copilot", [
                 "-C", mirror.worktree,
                 "-p",
                 "Maintain this RPM mirror using the attached instructions " +
                   "and context. Inspect the configured upstream and mirror " +
-                  "remotes, update only the package spec and mirror metadata, " +
+                  "remotes. Update only the package spec and " +
+                  "mirror metadata, " +
                   "and leave all changes uncommitted for the workflow action.",
                 "--attachment", instruction,
                 "--attachment", mirror.context_path,
@@ -256,7 +276,9 @@ jobs:
             const path = require("node:path");
             const mirrors = JSON.parse(process.env.MIRROR_PLAN);
             if (mirrors.length !== 1) {
-              throw new Error("Mirror validation expects exactly one package target.");
+              throw new Error(
+                "Mirror validation expects exactly one package target.",
+              );
             }
             const mirror = mirrors[0];
             const worktree = path.join(
@@ -285,21 +307,23 @@ jobs:
               );
             }
             if (git(["diff", "--name-only", "--diff-filter=U"])) {
-              throw new Error(`Unresolved conflicts in ${mirror.target_branch}`);
+              throw new Error(
+                `Unresolved conflicts in ${mirror.target_branch}`,
+              );
             }
 
             const metadataPath = path.join(worktree, ".rpm-mirror.json");
             const specPath = path.join(worktree, mirror.spec);
-            const expectedWorktree = path.join(
-              process.env.RUNNER_TEMP,
-              "rpm-mirrors",
-              mirror.id,
-            );
-            if (fs.realpathSync(worktree) !== expectedWorktree) {
-              throw new Error(`Invalid mirror worktree path for ${mirror.target_branch}`);
+            if (fs.realpathSync(worktree) !== worktree) {
+              throw new Error(
+                `Invalid mirror worktree path for ${mirror.target_branch}`,
+              );
             }
             for (const file of [metadataPath, specPath]) {
-              if (!fs.lstatSync(file).isFile()) {
+              if (
+                !fs.lstatSync(file).isFile() ||
+                fs.realpathSync(file) !== file
+              ) {
                 throw new Error(`Expected a regular mirror file: ${file}`);
               }
             }
@@ -316,9 +340,12 @@ jobs:
             if (
               JSON.stringify(Object.keys(metadata).sort()) !==
                 JSON.stringify(Object.keys(expected).sort()) ||
-              Object.entries(expected).some(([key, value]) => metadata[key] !== value)
+              Object.entries(expected)
+                .some(([key, value]) => metadata[key] !== value)
             ) {
-              throw new Error(`Invalid mirror metadata for ${mirror.target_branch}`);
+              throw new Error(
+                `Invalid mirror metadata for ${mirror.target_branch}`,
+              );
             }
 
             const changed = new Set();
@@ -332,7 +359,9 @@ jobs:
               }
             }
             const allowed = new Set([mirror.spec, ".rpm-mirror.json"]);
-            const unexpected = [...changed].filter((file) => !allowed.has(file));
+            const unexpected = [...changed].filter(
+              (file) => !allowed.has(file),
+            );
             if (unexpected.length) {
               throw new Error(
                 `Unexpected mirror changes: ${unexpected.join(", ")}`,
@@ -352,7 +381,10 @@ jobs:
               recursive: true,
             });
             fs.copyFileSync(specPath, path.join(artifactRoot, mirror.spec));
-            fs.copyFileSync(metadataPath, path.join(artifactRoot, ".rpm-mirror.json"));
+            fs.copyFileSync(
+              metadataPath,
+              path.join(artifactRoot, ".rpm-mirror.json"),
+            );
             fs.writeFileSync(
               path.join(artifactRoot, "manifest.json"),
               `${JSON.stringify({
@@ -391,10 +423,9 @@ jobs:
           name: rpm-mirror-changes
           path: ${{ runner.temp }}/rpm-mirror-changes
 
-      - name: Publish signed mirror update
+      - name: Validate and stage agent changes
         uses: actions/github-script@v9
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           TARGET_BRANCH: ${{ needs.prepare.outputs.target_branch }}
           MIRROR_PLAN: ${{ needs.prepare.outputs.plan }}
         with:
@@ -413,7 +444,9 @@ jobs:
             ));
             const mirrors = JSON.parse(process.env.MIRROR_PLAN);
             if (mirrors.length !== 1) {
-              throw new Error("Mirror publishing expects exactly one package target.");
+              throw new Error(
+                "Mirror publishing expects exactly one package target.",
+              );
             }
             const mirror = mirrors[0];
 
@@ -435,16 +468,22 @@ jobs:
               manifest.target_branch !== mirror.target_branch ||
               JSON.stringify(manifest) !== JSON.stringify(mirror)
             ) {
-              throw new Error("Agent artifact targets an unexpected mirror branch.");
+              throw new Error(
+                "Agent artifact targets an unexpected mirror branch.",
+              );
             }
             if (git(["rev-parse", "HEAD"]) !== manifest.base_sha) {
               throw new Error(
-                `Mirror ${manifest.target_branch} changed while the agent ran; retry.`,
+                `Mirror ${manifest.target_branch} changed while the agent ` +
+                  "ran; retry.",
               );
             }
             const files = new Set();
             function list(directory, prefix = "") {
-              for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+              const entries = fs.readdirSync(directory, {
+                withFileTypes: true,
+              });
+              for (const entry of entries) {
                 const relative = path.posix.join(prefix, entry.name);
                 const fullPath = path.join(directory, entry.name);
                 if (entry.isDirectory()) list(fullPath, relative);
@@ -453,7 +492,11 @@ jobs:
               }
             }
             list(artifactRoot);
-            const expectedFiles = new Set(["manifest.json", manifest.spec, ".rpm-mirror.json"]);
+            const expectedFiles = new Set([
+              "manifest.json",
+              manifest.spec,
+              ".rpm-mirror.json",
+            ]);
             if (
               files.size !== expectedFiles.size ||
               [...files].some((file) => !expectedFiles.has(file))
@@ -477,14 +520,18 @@ jobs:
             if (
               JSON.stringify(Object.keys(metadata).sort()) !==
                 JSON.stringify(Object.keys(expected).sort()) ||
-              Object.entries(expected).some(([key, value]) => metadata[key] !== value)
+              Object.entries(expected)
+                .some(([key, value]) => metadata[key] !== value)
             ) {
               throw new Error("Agent artifact has invalid mirror metadata.");
             }
 
             const specDestination = path.join(root, manifest.spec);
             fs.mkdirSync(path.dirname(specDestination), { recursive: true });
-            fs.copyFileSync(path.join(artifactRoot, manifest.spec), specDestination);
+            fs.copyFileSync(
+              path.join(artifactRoot, manifest.spec),
+              specDestination,
+            );
             fs.copyFileSync(
               path.join(artifactRoot, ".rpm-mirror.json"),
               path.join(root, ".rpm-mirror.json"),
@@ -497,22 +544,17 @@ jobs:
               });
               throw new Error("Agent changes are empty; refusing to publish.");
             } catch (error) {
-              if (error.message.startsWith("Agent changes are empty")) throw error;
+              if (error.message.startsWith("Agent changes are empty")) {
+                throw error;
+              }
               if (error.status !== 1) throw error;
             }
-            execFileSync(
-              "npx",
-              [
-                "--yes",
-                "push-signed-commits@1.2.1",
-                "-m",
-                `Update ${manifest.project} RPM mirror`,
-                process.env.GITHUB_REPOSITORY,
-                manifest.target_branch,
-              ],
-              {
-                cwd: root,
-                stdio: "inherit",
-                env: process.env,
-              },
-            );
+
+      - name: Create signed mirror commit
+        uses: pgaskin/push-signed-commits@v1.2.1
+        with:
+          path: .
+          repository: ${{ github.repository }}
+          branch: ${{ needs.prepare.outputs.target_branch }}
+          commit-message: Update RPM mirror
+          github-token: ${{ github.token }}

@@ -54,9 +54,10 @@ jobs:
             const os = require("node:os");
             const path = require("node:path");
 
-            const plan = JSON.parse(fs.readFileSync(process.env.PLAN_FILE, "utf8"));
+            const plan = JSON.parse(
+              fs.readFileSync(process.env.PLAN_FILE, "utf8"),
+            );
             const repository = process.env.GH_REPOSITORY;
-            const githubUrl = `https://github.com/${repository}.git`;
             const mirrorUrl = plan.sources.mirror_url_pattern.replace(
               "{repository}",
               repository,
@@ -79,15 +80,19 @@ jobs:
               }
             }
 
-            function branchHead(url, branch) {
-              const result = git([
+            function remoteBranch(url, branch) {
+              return git([
                 "ls-remote", "--heads", url, `refs/heads/${branch}`,
               ], process.env.GITHUB_WORKSPACE);
-              return result ? result.split(/\s+/)[0] : "";
             }
 
             function branchExists(url, branch) {
-              return Boolean(branchHead(url, branch));
+              return Boolean(remoteBranch(url, branch));
+            }
+
+            function branchSha(url, branch) {
+              const result = remoteBranch(url, branch);
+              return result ? result.split(/\s+/)[0] : "";
             }
 
             function format(pattern, project, osVersion, version) {
@@ -98,7 +103,9 @@ jobs:
             }
 
             function mirroredSourceSha(branch, metadataFile) {
-              const temp = fs.mkdtempSync(path.join(os.tmpdir(), "rpm-mirror-check-"));
+              const temp = fs.mkdtempSync(
+                path.join(os.tmpdir(), "rpm-mirror-check-"),
+              );
               try {
                 git(["init", "--quiet", temp], temp);
                 git(["remote", "add", "mirror", mirrorUrl], temp);
@@ -121,7 +128,9 @@ jobs:
             }
 
             if (!plan.sources.projects.includes(project)) {
-              throw new Error(`RPM project is not in the source plan: ${project}`);
+              throw new Error(
+                `RPM project is not in the source plan: ${project}`,
+              );
             }
             const key = `${version}/el${osVersion}`;
             const allowedTargets = new Set(
@@ -154,7 +163,12 @@ jobs:
             } else {
               let sourceBranch;
               if (shared) {
-                sourceBranch = format(sharedPattern, project, osVersion, version);
+                sourceBranch = format(
+                  sharedPattern,
+                  project,
+                  osVersion,
+                  version,
+                );
               } else {
                 const fallbackPattern =
                   plan.sources.fallback_branch_patterns?.[project]?.[osVersion];
@@ -164,7 +178,12 @@ jobs:
                       `EL${osVersion} OKD ${version}`,
                   );
                 }
-                sourceBranch = format(fallbackPattern, project, osVersion, version);
+                sourceBranch = format(
+                  fallbackPattern,
+                  project,
+                  osVersion,
+                  version,
+                );
               }
               if (!branchExists(sourceUrl, sourceBranch)) {
                 throw new Error(`Missing source branch ${sourceBranch}`);
@@ -172,17 +191,21 @@ jobs:
 
               const targetVersion = shared ? `el${osVersion}` : version;
               const targetBranch = format(
-                plan.sources.mirror_branch_patterns[shared ? "shared" : "okd_release"],
+                plan.sources.mirror_branch_patterns[
+                  shared ? "shared" : "okd_release"
+                ],
                 project,
                 osVersion,
                 targetVersion,
               );
-              const targetExists = branchExists(mirrorUrl, targetBranch);
-              const sourceSha = targetExists ? branchHead(sourceUrl, sourceBranch) : "";
-              const currentSourceSha = targetExists
+              const mirrorExists = branchExists(mirrorUrl, targetBranch);
+              const sourceSha = mirrorExists
+                ? branchSha(sourceUrl, sourceBranch)
+                : "";
+              const currentSourceSha = mirrorExists
                 ? mirroredSourceSha(targetBranch, plan.sources.metadata_file)
                 : "";
-              const needsSync = !targetExists || sourceSha !== currentSourceSha;
+              const needsSync = !mirrorExists || sourceSha !== currentSourceSha;
 
               mirror = {
                 id: shared
@@ -198,7 +221,10 @@ jobs:
                 spec: plan.sources.spec_pattern.replace("{project}", project),
               };
               sources[key][project] = { url: mirrorUrl, branch: targetBranch };
-              core.setOutput("mirrors", JSON.stringify(needsSync ? [mirror] : []));
+              core.setOutput(
+                "mirrors",
+                JSON.stringify(needsSync ? [mirror] : []),
+              );
             }
 
             if (!mirror) core.setOutput("mirrors", "[]");

@@ -27,26 +27,32 @@ compares the upstream head SHA with the `source_sha` recorded in the branch's
 is solely the mirror freshness check; branch selection is based on branch
 availability. No RPM `Release:` value is checked or assumed deterministic.
 
-When a mirror needs setup or an update, `sync-rpm-mirror.yml` fetches the
-upstream and mirror refs and provides them as remotes in a worktree. Copilot
-compares the refs and maintains only the package spec and `.rpm-mirror.json`.
-For CRI-O EL9, it preserves the `containernetworking-plugins` suggestion and
-`%{_libexecdir}/cni` plugin directory. The workflow verifies the metadata and
-allowed file set, stages the changes, then creates and publishes signed commits
-through `push-signed-commits`; the agent does not commit or push. A new mirror
-branch is initialized from the selected upstream branch. Do not modify other
-files, reset, or force-push a mirror branch.
+When a mirror needs setup or an update, `sync-rpm-mirror.yml` prepares any
+missing target branch, then gives the agent the upstream and mirror remotes in
+a worktree. The Copilot job has `contents: read` and maintains only the package
+spec and `.rpm-mirror.json`; it cannot push repository changes. For CRI-O EL9,
+it preserves the `containernetworking-plugins` suggestion and
+`%{_libexecdir}/cni` plugin directory. A separate workflow job validates the
+agent artifact, checks the mirror branch has not moved, and stages the two
+allowed files. `push-signed-commits` creates and publishes the signed update;
+the agent does not commit or push. A new mirror branch is initialized from
+the selected upstream branch. Do not modify other files, reset, or force-push
+a mirror branch.
 
 The metadata records `project`, `target_el`, `target_version`, `source_url`,
 `source_branch`, `spec`, and `source_sha`. A later source SHA mismatch triggers
-the agent to reconcile the mirror spec to the current upstream source.
+the agent to reconcile the mirror spec to the current upstream source. SHAs in
+the sync workflow are also used to seed a new branch, validate the checked-out
+snapshot, and identify the branch head for signed publication; they do not
+choose the source branch.
 `scan-okd-releases.yml` collects the per-call source artifacts before composing
 release build configurations; its build matrix calls the reusable image
 workflow once per release target. `reproduce-rpm-build.yml` is the manual
 RPM-build entry point and also owns the package matrix. The sync job has
-`contents: write` and `copilot-requests: write`; Copilot uses `gpt-6-luna`,
-long context, and maximum reasoning effort. The organization must allow Copilot
-CLI requests billed to the organization.
+separate permissions: setup and commit jobs have `contents: write`, while the
+agent job has `contents: read` and `copilot-requests: write`. Copilot uses
+`gpt-6-luna`, long context, and maximum reasoning effort. The organization must
+allow Copilot CLI requests billed to the organization.
 
 `conmon-rs` uses the shared EL9 source branch `c9s-sig-cloud` and mirror
 `rpms/conmon-rs-el9` because CentOS Cloud has no OKD-release-specific c9s
@@ -109,5 +115,4 @@ find "$topdir/RPMS" -type f -name '*.rpm' -print
 ```
 
 Check the RPM identity with
-`rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' <rpm-file>`; the
-release should include `fallback.source_1.35.5_package_cri_o_target_4.22`.
+`rpm -qp --qf '%{NAME}-%{VERSION}.%{ARCH}\n' <rpm-file>`.
