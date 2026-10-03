@@ -28,7 +28,7 @@ jobs:
       contents: read
     outputs:
       matrix: ${{ steps.releases.outputs.matrix }}
-      targets: ${{ steps.releases.outputs.targets }}
+      source_matrix: ${{ steps.releases.outputs.source_matrix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -131,21 +131,33 @@ jobs:
             }
             core.setOutput("matrix", JSON.stringify(matrix));
             core.setOutput(
-              "targets",
-              JSON.stringify(targets.map((target) => ({
-                okd_version: target.version,
-                os_version: target.os_version,
-              }))),
+              "source_matrix",
+              JSON.stringify(targets.flatMap((target) =>
+                plan.sources.projects.map((project) => ({
+                  okd_version: target.version,
+                  os_version: target.os_version,
+                  project,
+                  artifact_name:
+                    `rpm-source-${target.version}-el${target.os_version}-${project}`,
+                })),
+              )),
             );
 
   prepare-rpm-sources:
     needs: release-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.release-matrix.outputs.source_matrix) }}
     permissions:
       contents: write
       copilot-requests: write
     uses: ./.github/workflows/prepare-rpm-sources.yml
     with:
-      targets: ${{ needs.release-matrix.outputs.targets }}
+      okd_version: ${{ matrix.okd_version }}
+      os_version: ${{ matrix.os_version }}
+      project: ${{ matrix.project }}
+      artifact_name: ${{ matrix.artifact_name }}
 
   compose-build-configs:
     needs:
@@ -155,12 +167,16 @@ jobs:
     outputs:
       matrix: ${{ steps.configs.outputs.matrix }}
     steps:
+      - name: Collect prepared RPM sources
+        id: sources
+        uses: ./.github/actions/collect-rpm-sources
+
       - name: Combine release and RPM source configurations
         id: configs
         uses: actions/github-script@v9
         env:
           RELEASES: ${{ needs.release-matrix.outputs.matrix }}
-          SOURCES: ${{ needs.prepare-rpm-sources.outputs.sources }}
+          SOURCES: ${{ steps.sources.outputs.sources }}
         with:
           script: |
             const releases = JSON.parse(process.env.RELEASES);

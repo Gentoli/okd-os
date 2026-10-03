@@ -27,15 +27,38 @@ permissions:
 
 jobs:
   prepare-rpm-sources:
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - cri-o
+          - cri-tools
+          - conmon-rs
     permissions:
       contents: write
       copilot-requests: write
     uses: ./.github/workflows/prepare-rpm-sources.yml
     with:
-      targets: '[{"okd_version":"${{ inputs.okd_version }}","os_version":"${{ inputs.os_version }}"}]'
+      okd_version: ${{ inputs.okd_version }}
+      os_version: ${{ inputs.os_version }}
+      project: ${{ matrix.project }}
+      artifact_name: rpm-source-${{ inputs.okd_version }}-el${{ inputs.os_version }}-${{ matrix.project }}
+
+  collect-rpm-sources:
+    needs: prepare-rpm-sources
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sources: ${{ steps.sources.outputs.sources }}
+    steps:
+      - name: Collect prepared RPM sources
+        id: sources
+        uses: ./.github/actions/collect-rpm-sources
 
   build-rpms:
-    needs: prepare-rpm-sources
+    needs: collect-rpm-sources
     permissions:
       actions: read
       contents: read
@@ -44,6 +67,6 @@ jobs:
       okd_version: ${{ inputs.okd_version }}
       os_version: ${{ inputs.os_version }}
       sig_sources: >-
-        ${{ toJSON(fromJSON(needs.prepare-rpm-sources.outputs.sources)[format(
+        ${{ toJSON(fromJSON(needs.collect-rpm-sources.outputs.sources)[format(
           '{0}/el{1}', inputs.okd_version, inputs.os_version)]) }}
       run_test: ${{ inputs.run_test }}

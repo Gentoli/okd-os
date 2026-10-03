@@ -3,14 +3,26 @@ name: Prepare RPM sources
 on:
   workflow_call:
     inputs:
-      targets:
-        description: JSON array of selected OKD version and OS version targets
+      okd_version:
+        description: OKD release version
+        required: true
+        type: string
+      os_version:
+        description: CentOS Stream major version
+        required: true
+        type: string
+      project:
+        description: RPM project
+        required: true
+        type: string
+      artifact_name:
+        description: Unique artifact name for the resolved package source
         required: true
         type: string
     outputs:
       sources:
-        description: JSON map of targets to resolved RPM sources
-        value: ${{ jobs.collect-sources.outputs.sources }}
+        description: Resolved source map for this package and target
+        value: ${{ jobs.resolve.outputs.sources }}
 
 permissions:
   contents: read
@@ -21,182 +33,67 @@ concurrency:
   queue: max
 
 jobs:
-  expand:
+  plan:
     runs-on: ubuntu-latest
     outputs:
-      entries: ${{ steps.expand.outputs.entries }}
+      mirrors: ${{ steps.plan.outputs.mirrors }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Expand package and release matrix
-        id: expand
-        uses: actions/github-script@v9
-        env:
-          TARGETS: ${{ inputs.targets }}
-        with:
-          script: |
-            const fs = require("node:fs");
-            const plan = JSON.parse(fs.readFileSync(
-              `${process.env.GITHUB_WORKSPACE}/rpms/mirror-plan.json`,
-              "utf8",
-            ));
-            const targets = JSON.parse(process.env.TARGETS);
-            const allowedTargets = new Set(plan.build_targets.map((target) =>
-              `${target.okd_version}/el${target.os_version}`,
-            ));
-            const seen = new Set();
-            for (const target of targets) {
-              const key = `${target.okd_version}/el${target.os_version}`;
-              if (!allowedTargets.has(key)) {
-                throw new Error(`RPM target is not in the source plan: ${key}`);
-              }
-              if (seen.has(key)) {
-                throw new Error(`Duplicate RPM target: ${key}`);
-              }
-              seen.add(key);
-            }
-            const entries = targets.flatMap((target) =>
-              plan.sources.projects.map((project) => ({
-                entry_id: `${target.okd_version}-el${target.os_version}-${project}`,
-                okd_version: target.okd_version,
-                os_version: target.os_version,
-                project,
-              })),
-            );
-            if (!entries.length) {
-              throw new Error("No RPM source targets were selected.");
-            }
-            core.setOutput("entries", JSON.stringify(entries));
-
-  plan-mirrors:
-    needs: expand
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.expand.outputs.entries) }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Check this package and release mirror
+      - name: Check package source mirror
         id: plan
         uses: ./.github/actions/plan-rpm-mirrors
         with:
           repository: ${{ github.repository }}
           targets: >-
             ${{ format('[{{"okd_version":"{0}","os_version":"{1}"}}]',
-            matrix.okd_version, matrix.os_version) }}
-          project: ${{ matrix.project }}
+            inputs.okd_version, inputs.os_version) }}
+          project: ${{ inputs.project }}
           plan-file: rpms/mirror-plan.json
 
-      - name: Save mirror plan
-        uses: actions/github-script@v9
-        env:
-          ENTRY_ID: ${{ matrix.entry_id }}
-          MIRRORS: ${{ steps.plan.outputs.mirrors }}
-        with:
-          script: |
-            const fs = require("node:fs");
-            const path = require("node:path");
-            fs.writeFileSync(
-              path.join(
-                process.env.RUNNER_TEMP,
-                `${process.env.ENTRY_ID}.json`,
-              ),
-              `${JSON.stringify(JSON.parse(process.env.MIRRORS))}\n`,
-            );
-
-      - name: Upload mirror plan
-        uses: actions/upload-artifact@v4
-        with:
-          name: rpm-mirror-plan-${{ matrix.entry_id }}
-          path: ${{ runner.temp }}/${{ matrix.entry_id }}.json
-          if-no-files-found: error
-          retention-days: 1
-
-  collect-mirrors:
-    needs: plan-mirrors
-    runs-on: ubuntu-latest
-    outputs:
-      mirrors: ${{ steps.collect.outputs.mirrors }}
-    steps:
-      - name: Download mirror plans
-        uses: actions/download-artifact@v4.1.3
-        with:
-          pattern: rpm-mirror-plan-*
-          path: ${{ runner.temp }}/rpm-mirror-plans
-          merge-multiple: true
-
-      - name: Combine stale mirror rows
-        id: collect
-        uses: actions/github-script@v9
-        env:
-          PLAN_DIR: ${{ runner.temp }}/rpm-mirror-plans
-        with:
-          script: |
-            const fs = require("node:fs");
-            const path = require("node:path");
-            const rows = fs.readdirSync(process.env.PLAN_DIR)
-              .filter((file) => file.endsWith(".json"))
-              .flatMap((file) => JSON.parse(fs.readFileSync(
-                path.join(process.env.PLAN_DIR, file),
-                "utf8",
-              )));
-            const byBranch = new Map();
-            for (const row of rows) {
-              const previous = byBranch.get(row.target_branch);
-              if (
-                previous &&
-                (previous.source_sha !== row.source_sha ||
-                  previous.patch_id !== row.patch_id)
-              ) {
-                throw new Error(
-                  `Conflicting mirror plans for ${row.target_branch}`,
-                );
-              }
-              byBranch.set(row.target_branch, previous ?? row);
-            }
-            core.setOutput("mirrors", JSON.stringify([...byBranch.values()]));
-
-  sync-mirrors:
-    needs: collect-mirrors
+  sync:
+    needs: plan
+    if: needs.plan.outputs.mirrors != '[]'
     permissions:
       contents: write
       copilot-requests: write
     uses: ./.github/workflows/sync-rpm-mirror.yml
     with:
-      mirrors: ${{ needs.collect-mirrors.outputs.mirrors }}
+      mirrors: ${{ needs.plan.outputs.mirrors }}
 
-  resolve-sources:
+  resolve:
     needs:
-      - expand
-      - sync-mirrors
+      - plan
+      - sync
+    if: >-
+      ${{
+        always() &&
+        needs.plan.result == 'success' &&
+        (needs.sync.result == 'success' || needs.sync.result == 'skipped')
+      }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.expand.outputs.entries) }}
+    outputs:
+      sources: ${{ steps.resolve.outputs.sources }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Resolve this package source
+      - name: Resolve package source
         id: resolve
         uses: ./.github/actions/resolve-rpm-sources
         with:
           repository: ${{ github.repository }}
           targets: >-
             ${{ format('[{{"okd_version":"{0}","os_version":"{1}"}}]',
-            matrix.okd_version, matrix.os_version) }}
-          project: ${{ matrix.project }}
+            inputs.okd_version, inputs.os_version) }}
+          project: ${{ inputs.project }}
           plan-file: rpms/mirror-plan.json
 
-      - name: Save resolved source
+      - name: Save source map
         uses: actions/github-script@v9
         env:
-          ENTRY_ID: ${{ matrix.entry_id }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
           SOURCES: ${{ steps.resolve.outputs.sources }}
         with:
           script: |
@@ -205,58 +102,15 @@ jobs:
             fs.writeFileSync(
               path.join(
                 process.env.RUNNER_TEMP,
-                `${process.env.ENTRY_ID}.json`,
+                `${process.env.ARTIFACT_NAME}.json`,
               ),
               `${JSON.stringify(JSON.parse(process.env.SOURCES))}\n`,
             );
 
-      - name: Upload resolved source
+      - name: Upload source map
         uses: actions/upload-artifact@v4
         with:
-          name: rpm-source-${{ matrix.entry_id }}
-          path: ${{ runner.temp }}/${{ matrix.entry_id }}.json
+          name: ${{ inputs.artifact_name }}
+          path: ${{ runner.temp }}/${{ inputs.artifact_name }}.json
           if-no-files-found: error
           retention-days: 1
-
-  collect-sources:
-    needs: resolve-sources
-    runs-on: ubuntu-latest
-    outputs:
-      sources: ${{ steps.collect.outputs.sources }}
-    steps:
-      - name: Download resolved sources
-        uses: actions/download-artifact@v4.1.3
-        with:
-          pattern: rpm-source-*
-          path: ${{ runner.temp }}/rpm-sources
-          merge-multiple: true
-
-      - name: Combine package source maps
-        id: collect
-        uses: actions/github-script@v9
-        env:
-          SOURCE_DIR: ${{ runner.temp }}/rpm-sources
-        with:
-          script: |
-            const fs = require("node:fs");
-            const path = require("node:path");
-            const sources = {};
-            for (const file of fs.readdirSync(process.env.SOURCE_DIR)) {
-              if (!file.endsWith(".json")) continue;
-              const partial = JSON.parse(fs.readFileSync(
-                path.join(process.env.SOURCE_DIR, file),
-                "utf8",
-              ));
-              for (const [target, packages] of Object.entries(partial)) {
-                sources[target] ??= {};
-                for (const [project, source] of Object.entries(packages)) {
-                  if (sources[target][project]) {
-                    throw new Error(
-                      `Duplicate source result for ${target}/${project}`,
-                    );
-                  }
-                  sources[target][project] = source;
-                }
-              }
-            }
-            core.setOutput("sources", JSON.stringify(sources));

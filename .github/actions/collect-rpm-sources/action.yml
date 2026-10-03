@@ -1,0 +1,50 @@
+name: Collect RPM sources
+description: Download and combine source maps from prepare-rpm-sources matrix jobs
+inputs:
+  pattern:
+    description: Artifact name pattern
+    required: false
+    default: rpm-source-*
+outputs:
+  sources:
+    description: Combined source map keyed by OKD version and EL
+    value: ${{ steps.collect.outputs.sources }}
+runs:
+  using: composite
+  steps:
+    - name: Download resolved sources
+      uses: actions/download-artifact@v4.1.3
+      with:
+        pattern: ${{ inputs.pattern }}
+        path: ${{ runner.temp }}/rpm-sources
+        merge-multiple: true
+
+    - name: Combine package source maps
+      id: collect
+      uses: actions/github-script@v9
+      env:
+        SOURCE_DIR: ${{ runner.temp }}/rpm-sources
+      with:
+        script: |
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const sources = {};
+          for (const file of fs.readdirSync(process.env.SOURCE_DIR)) {
+            if (!file.endsWith(".json")) continue;
+            const partial = JSON.parse(fs.readFileSync(
+              path.join(process.env.SOURCE_DIR, file),
+              "utf8",
+            ));
+            for (const [target, packages] of Object.entries(partial)) {
+              sources[target] ??= {};
+              for (const [project, source] of Object.entries(packages)) {
+                if (sources[target][project]) {
+                  throw new Error(
+                    `Duplicate source result for ${target}/${project}`,
+                  );
+                }
+                sources[target][project] = source;
+              }
+            }
+          }
+          core.setOutput("sources", JSON.stringify(sources));
