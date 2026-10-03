@@ -12,9 +12,11 @@ Compare the CentOS SIG's [4.20 EL9 and EL10 branches](https://gitlab.com/CentOS/
 The EL9 spec retains a `Suggests` for `containernetworking-plugins` and passes
 `%{_libexecdir}/cni` as an additional CNI plugin directory when generating the
 default CRI-O configuration. The EL10 spec drops those EL9-specific settings.
-The patch restores only those two settings on top of the 4.22 EL10 spec; it
-keeps the 4.22 version, source commit, vendored Go build, and remaining package
-metadata unchanged.
+Both branches use the same RHEL `<= 10` Go build path, so this diff does not
+identify a build-only fix. The missing 4.22/EL9 RPM is addressed by building
+from the available 4.22 EL10 branch in an EL9 environment; this patch restores
+the two EL9 CNI dependency/configuration settings without reverting unrelated
+version or source changes.
 
 The `rpm-build.yml` workflow uses `c10s-sig-cloud-okd-4.22` only for the
 4.22/EL9 CRI-O build, applies this patch before fetching lookaside sources, and
