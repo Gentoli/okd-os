@@ -31,11 +31,10 @@ on:
         description: OpenShift package repository version
         required: true
         type: string
-      rpm_run_id:
-        description: Successful RPM Build Reproduction run ID for base composes
-        required: false
+      rpm_targets:
+        description: JSON array of RPM build targets
+        required: true
         type: string
-
 permissions:
   actions: read
   contents: read
@@ -68,111 +67,178 @@ jobs:
       - name: Install registry inspection tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y jq skopeo
+          sudo apt-get install --no-install-recommends -y skopeo
 
       - name: Resolve release images
         id: images
-        run: |
-          set -euo pipefail
-          inspect_image() {
-            local image_ref=$1
-            local inspection
-            inspection=$(skopeo inspect "docker://${image_ref}")
-            jq -cn \
-              --argjson image "$inspection" \
-              '{
-                digest: $image.Digest,
-                stream: ($image.Labels["com.coreos.stream"] // ""),
-                version: (
-                  $image.Labels["org.opencontainers.image.version"]
-                  // $image.Labels["com.coreos.buildid"]
-                  // "unknown"
-                ),
-                revision: (
-                  $image.Labels["org.opencontainers.image.revision"]
-                  // $image.Labels["io.openshift.build.commit.id"]
-                  // "unknown"
-                ),
-                scos_base_digest: (
-                  $image.Labels["io.okd.source.scos-base.digest"] // "unknown"
-                ),
-                scos_base_version: (
-                  $image.Labels["io.okd.source.scos-base.version"] // "unknown"
-                ),
-                scos_base_revision: (
-                  $image.Labels["io.okd.source.scos-base.revision"] // "unknown"
-                ),
-                openshift_os_revision: (
-                  $image.Labels["io.okd.source.openshift-os.revision"]
-                  // "unknown"
-                ),
-                rpm_build_run: (
-                  $image.Labels["io.okd.source.rpm-build.run"] // "unknown"
-                )
-              }'
-          }
+        uses: actions/github-script@v9
+        env:
+          RELEASE_IMAGE: ${{ inputs.release_image }}
+          BASE_STREAM: ${{ inputs.base_stream }}
+        with:
+          script: |
+            const { execFileSync } = require("node:child_process");
+            const releaseImage = process.env.RELEASE_IMAGE;
+            const baseStream = process.env.BASE_STREAM;
 
-          stream_image=$(oc adm release info \
-            --image-for stream-coreos "$RELEASE_IMAGE" 2>/dev/null || true)
-          dtk_image=$(oc adm release info \
-            --image-for driver-toolkit "$RELEASE_IMAGE" 2>/dev/null || true)
-          stream_info='{}'
-          dtk_info='{}'
-          compose=false
-          skip_build=false
+            function run(command, args) {
+              return execFileSync(command, args, {
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "ignore"],
+              }).trim();
+            }
 
-          if [[ -n "$stream_image" ]]; then
-            stream_info=$(inspect_image "$stream_image")
-            stream_base=$(jq -r '.stream' <<< "$stream_info")
-            if [[ "$stream_base" != "$BASE_STREAM" ]]; then
-              echo "Release stream-coreos is for $stream_base," \
-                "not $BASE_STREAM."
-              stream_image=""
-              stream_info='{}'
-            fi
-          fi
-          if [[ -z "$stream_image" ]]; then
-            if [[ "$BASE_STREAM" == "c10s" ]]; then
-              echo "No matching c10s stream-coreos image;" \
-                "c10s has no base fallback."
-              skip_build=true
-            else
-              compose=true
-            fi
-          fi
+            function releaseImageFor(component) {
+              try {
+                return run("oc", [
+                  "adm",
+                  "release",
+                  "info",
+                  "--image-for",
+                  component,
+                  releaseImage,
+                ]);
+              } catch {
+                return "";
+              }
+            }
 
-          if [[ -n "$dtk_image" ]]; then
-            dtk_info=$(inspect_image "$dtk_image")
-            dtk_base=$(jq -r '.stream' <<< "$dtk_info")
-            if [[ -n "$dtk_base" && "$dtk_base" != "$BASE_STREAM" ]]; then
-              echo "Release driver-toolkit is for $dtk_base, not $BASE_STREAM."
-              dtk_image=""
-              dtk_info='{}'
-            elif [[ -z "$dtk_base" && -z "$stream_image" ]]; then
-              dtk_image=""
-              dtk_info='{}'
-            fi
-          fi
-          if [[ -z "$dtk_image" && -n "$stream_image" ]]; then
-            dtk_image=$stream_image
-            dtk_info=$stream_info
-          fi
-          echo "stream_image=$stream_image" >> "$GITHUB_OUTPUT"
-          echo "stream_info=$stream_info" >> "$GITHUB_OUTPUT"
-          echo "dtk_image=$dtk_image" >> "$GITHUB_OUTPUT"
-          echo "dtk_info=$dtk_info" >> "$GITHUB_OUTPUT"
-          echo "compose=$compose" >> "$GITHUB_OUTPUT"
-          echo "skip_build=$skip_build" >> "$GITHUB_OUTPUT"
+            function inspectImage(imageRef) {
+              const fields = [
+                ".Digest",
+                'index .Labels "com.coreos.stream"',
+                'index .Labels "org.opencontainers.image.version"',
+                'index .Labels "com.coreos.buildid"',
+                'index .Labels "org.opencontainers.image.revision"',
+                'index .Labels "io.openshift.build.commit.id"',
+                'index .Labels "io.okd.source.scos-base.digest"',
+                'index .Labels "io.okd.source.scos-base.version"',
+                'index .Labels "io.okd.source.scos-base.revision"',
+                'index .Labels "io.okd.source.openshift-os.revision"',
+                'index .Labels "io.okd.source.rpm-build.run"',
+              ];
+              const format = fields
+                .map((field) => `{{${field}}}`)
+                .join('{{printf "%c" 0}}');
+              const values = run("skopeo", [
+                "inspect",
+                "--no-tags",
+                "--format",
+                format,
+                `docker://${imageRef}`,
+              ]).split("\0");
+              if (values.length !== fields.length) {
+                throw new Error("Skopeo returned incomplete image metadata.");
+              }
+              const [
+                digest,
+                stream,
+                imageVersion,
+                buildId,
+                imageRevision,
+                openshiftRevision,
+                scosBaseDigest,
+                scosBaseVersion,
+                scosBaseRevision,
+                openshiftOsRevision,
+                rpmBuildRun,
+              ] = values;
+              return {
+                digest,
+                stream,
+                version: imageVersion || buildId || "unknown",
+                revision: imageRevision || openshiftRevision || "unknown",
+                scos_base_digest: scosBaseDigest || "unknown",
+                scos_base_version: scosBaseVersion || "unknown",
+                scos_base_revision: scosBaseRevision || "unknown",
+                openshift_os_revision: openshiftOsRevision || "unknown",
+                rpm_build_run: rpmBuildRun || "unknown",
+              };
+            }
+
+            let streamImage = releaseImageFor("stream-coreos");
+            let dtkImage = releaseImageFor("driver-toolkit");
+            let streamInfo = {};
+            let dtkInfo = {};
+            let compose = false;
+            let skipBuild = false;
+
+            if (streamImage) {
+              streamInfo = inspectImage(streamImage);
+              if (streamInfo.stream !== baseStream) {
+                core.info(
+                  `Release stream-coreos is for ${streamInfo.stream}, ` +
+                  `not ${baseStream}.`
+                );
+                streamImage = "";
+                streamInfo = {};
+              }
+            }
+            if (!streamImage) {
+              if (baseStream === "c10s") {
+                core.info(
+                  "No matching c10s stream-coreos image; " +
+                  "c10s has no base fallback."
+                );
+                skipBuild = true;
+              } else {
+                compose = true;
+              }
+            }
+
+            if (dtkImage) {
+              dtkInfo = inspectImage(dtkImage);
+              if (dtkInfo.stream && dtkInfo.stream !== baseStream) {
+                core.info(
+                  `Release driver-toolkit is for ${dtkInfo.stream}, ` +
+                  `not ${baseStream}.`
+                );
+                dtkImage = "";
+                dtkInfo = {};
+              } else if (!dtkInfo.stream && !streamImage) {
+                dtkImage = "";
+                dtkInfo = {};
+              }
+            }
+            if (!dtkImage && streamImage) {
+              dtkImage = streamImage;
+              dtkInfo = streamInfo;
+            }
+
+            core.setOutput("stream_image", streamImage);
+            core.setOutput("stream_info", JSON.stringify(streamInfo));
+            core.setOutput("dtk_image", dtkImage);
+            core.setOutput("dtk_info", JSON.stringify(dtkInfo));
+            core.setOutput("compose", String(compose));
+            core.setOutput("skip_build", String(skipBuild));
+
+  build-rpms:
+    needs: resolve-source
+    if: needs.resolve-source.outputs.compose == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.rpm_targets) }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/rpm-build.yml
+    with:
+      okd_version: ${{ matrix.okd_version }}
+      os_version: ${{ matrix.os_version }}
+      build_sig: ${{ matrix.build_sig }}
+      run_test: ${{ matrix.run_test }}
 
   compose-base-image:
-    needs: resolve-source
+    needs:
+      - resolve-source
+      - build-rpms
     if: needs.resolve-source.outputs.compose == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     outputs:
       image_ref: ${{ steps.compose.outputs.image_ref }}
     env:
-      RPM_RUN_ID: ${{ inputs.rpm_run_id }}
       OKD_VERSION: ${{ inputs.version }}
       RELEASE_TAG: ${{ inputs.release_tag }}
       RELEASE_IMAGE: ${{ inputs.release_image }}
@@ -181,17 +247,6 @@ jobs:
       OS_MAJOR: ${{ inputs.os_major }}
       REPO_VERSION: ${{ inputs.repo_version }}
     steps:
-      - name: Validate RPM artifact run ID
-        id: rpm-run
-        run: |
-          set -euo pipefail
-          if [[ ! "$RPM_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
-            echo "A numeric rpm_run_id input is required when" \
-              "the payload has no matching stream-coreos image." >&2
-            exit 1
-          fi
-          echo "run_id=$RPM_RUN_ID" >> "$GITHUB_OUTPUT"
-
       - name: Checkout matching openshift/os source
         uses: actions/checkout@v4
         with:
@@ -208,17 +263,36 @@ jobs:
 
       - name: Allow provider RPM package names in the local repo
         working-directory: openshift-os
+        env:
+          OKD_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           script=build-node-image.sh
-          old="ose-gcp-gcr-*'"
-          new="ose-gcp-gcr-*,ecr-credential-provider*,acr-credential-provider*"
-          new+=",gcr-credential-provider*'"
-          if [[ $(grep -Fo "$old" "$script" | wc -l) -ne 1 ]]; then
-            echo "Pinned OS repo package allowlist not found as expected." >&2
-            exit 1
-          fi
-          sed -i "s/ose-gcp-gcr-\\*'/${new}/" "$script"
+          python3 - "$script" "$OKD_VERSION" <<'PY'
+          from pathlib import Path
+          import sys
+
+          script = Path(sys.argv[1])
+          okd_version = sys.argv[2]
+          source = script.read_text()
+          anchor = "ose-gcp-gcr-*"
+          if source.count(anchor) != 1:
+              raise SystemExit(
+                  "Pinned OS repo package allowlist not found exactly once."
+              )
+
+          provider_packages = [
+              "ecr-credential-provider*",
+              "acr-credential-provider*",
+              "gcr-credential-provider*",
+          ]
+          if okd_version == "4.22":
+              provider_packages.append("crio-credential-provider*")
+          source = source.replace(
+              anchor, ",".join([anchor, *provider_packages]), 1
+          )
+          script.write_text(source)
+          PY
           grep -F "includepkgs=" "$script"
 
       - name: Download matching RPM artifacts
@@ -227,9 +301,6 @@ jobs:
           pattern: "*-rpms-okd${{ inputs.version }}-el${{ inputs.os_major }}"
           path: ${{ runner.temp }}/okd-rpms
           merge-multiple: true
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.rpm-run.outputs.run_id }}
 
       - name: Prepare the local RPM repository
         env:
@@ -257,6 +328,14 @@ jobs:
               exit 1
             fi
           done
+          if [[ "$OKD_VERSION" == "4.22" ]] &&
+            ! find "$rpm_dir" -type f \
+              -name 'crio-credential-provider-*.rpm' -print -quit \
+              | grep -q .; then
+            echo "The selected run is missing" \
+              "crio-credential-provider RPMs." >&2
+            exit 1
+          fi
 
           createrepo_c "$rpm_dir"
           cat > "$RUNNER_TEMP/yumrepos" <<EOF
@@ -305,7 +384,7 @@ jobs:
             --label "io.okd.source.scos-base.digest=${base_digest}" \
             --label "io.okd.source.scos-base.revision=${base_revision}" \
             --label "io.okd.source.openshift-os.revision=${os_revision}" \
-            --label "io.okd.source.rpm-build.run=${RPM_RUN_ID}" \
+            --label "io.okd.source.rpm-build.run=${GITHUB_RUN_ID}" \
             --secret id=yumrepos,src="$RUNNER_TEMP/yumrepos" \
             --volume "$RUNNER_TEMP/okd-rpms:/var/tmp/okd-rpm-repo:ro" \
             --security-opt label=disable \
@@ -317,12 +396,17 @@ jobs:
   publish-overlays:
     needs:
       - resolve-source
+      - build-rpms
       - compose-base-image
     if: >-
       ${{
         always() &&
         needs.resolve-source.result == 'success' &&
         needs.resolve-source.outputs.skip_build != 'true' &&
+        (
+          needs.build-rpms.result == 'success' ||
+          needs.build-rpms.result == 'skipped'
+        ) &&
         (
           needs.compose-base-image.result == 'success' ||
           needs.compose-base-image.result == 'skipped'
@@ -362,21 +446,43 @@ jobs:
         id: kernel
         run: |
           set -euo pipefail
-          kernel_version=$(
-            podman run --rm --pull=always \
-              "quay.io/centos/centos:stream${OS_MAJOR}" \
-              bash -ec '
-                dnf install -y dnf-plugins-core >/dev/null 2>&1
-                dnf repoquery --latest-limit=1 \
-                  --qf "%{VERSION}-%{RELEASE}" kernel-core
-              '
-          )
+          use_composed_kernel=false
+          replace_stream_kernel=true
+          if [[ -n "$COMPOSED_IMAGE" ]]; then
+            if [[ "$OKD_VERSION" == "4.22" && "$OS_MAJOR" == "9" ]]; then
+              echo "Preserving the existing 4.22/EL9 kernel overlay behavior."
+            else
+              use_composed_kernel=true
+              replace_stream_kernel=false
+            fi
+          fi
+
+          if [[ "$use_composed_kernel" == true ]]; then
+            kernel_version=$(
+              podman run --rm \
+                --entrypoint /usr/bin/rpm \
+                "$COMPOSED_IMAGE" \
+                -q --qf '%{VERSION}-%{RELEASE}\n' kernel-core
+            )
+          else
+            kernel_version=$(
+              podman run --rm --pull=always \
+                "quay.io/centos/centos:stream${OS_MAJOR}" \
+                bash -ec '
+                  dnf install -y dnf-plugins-core >/dev/null 2>&1
+                  dnf repoquery --latest-limit=1 \
+                    --qf "%{VERSION}-%{RELEASE}" kernel-core
+                '
+            )
+          fi
           kernel_pattern="^[0-9][A-Za-z0-9._+-]*\\.el${OS_MAJOR}$"
           if [[ ! "$kernel_version" =~ $kernel_pattern ]]; then
-            echo "Could not resolve a valid EL${OS_MAJOR} kernel version." >&2
+            echo "Could not resolve one valid EL${OS_MAJOR} kernel version." >&2
             exit 1
           fi
           echo "version=$kernel_version" >> "$GITHUB_OUTPUT"
+          printf 'replace_stream_kernel=%s\n' "$replace_stream_kernel" \
+            >> "$GITHUB_OUTPUT"
 
       - name: Resolve image provenance
         id: provenance
@@ -479,6 +585,8 @@ jobs:
         uses: actions/github-script@v9
         env:
           KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+          REPLACE_STREAM_KERNEL: >-
+            ${{ steps.kernel.outputs.replace_stream_kernel }}
         with:
           script: |
             const { execFileSync } = require("node:child_process");
@@ -544,6 +652,12 @@ jobs:
                 "--build-arg",
                 `STREAM_MAJOR=${process.env.OS_MAJOR}`,
               ];
+              if (image.name === "stream-coreos") {
+                args.push(
+                  "--build-arg",
+                  `REPLACE_KERNEL=${process.env.REPLACE_STREAM_KERNEL}`
+                );
+              }
               for (const [key, value] of Object.entries(labels)) {
                 args.push("--label", `${key}=${value ?? "unknown"}`);
               }

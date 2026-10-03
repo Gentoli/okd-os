@@ -2,14 +2,13 @@
 
 ## Release matrix
 
-The scheduled/manual `scan-okd-releases.yml` workflow scans stable OKD releases
-4.20, 4.21, and 4.22, ignoring pre-releases, then calls the reusable
-`build-okd-stream-coreos.yml` workflow for each `c9s` and `c10s` variant. A
-release payload's matching `stream-coreos` image is reused and receives only
-the kernel/GCC overlays. If no matching c9s image exists, a separate job
-composes the machine image from the latest `scos-base:c9s` and matching RPM
-artifacts. It publishes `stream-coreos:<version>-<stream>` and
-`driver-toolkit:<version>-<stream>`.
+The push/scheduled/manual `scan-okd-releases.yml` workflow currently scans the
+4.22-c9s, 4.22-c10s, and 4.20-c9s targets. It calls the reusable
+`build-okd-stream-coreos.yml` workflow for each target. A matching
+`stream-coreos` image in the release payload is reused and receives only the
+kernel/GCC overlays. If no matching c9s image exists, the same workflow run
+builds the matching RPMs, composes the machine image from `scos-base:c9s`, then
+builds the overlays. A c10s target without a matching release image is skipped.
 
 ## Historical 4.20 compose details
 
@@ -224,26 +223,34 @@ the temporary artifact-download URL or at the ZIP itself.
 
 ## Current node-image workflow
 
-The scheduled/manual
+The push/scheduled/manual
 [`scan-okd-releases.yml`](.github/workflows/scan-okd-releases.yml) workflow
 scans stable releases at
 [okd-project/okd/releases](https://github.com/okd-project/okd/releases), ignoring
-pre-releases, then builds a 4.20/4.21/4.22 × c9s/c10s matrix. If a matching
-`stream-coreos` image is present in a release payload, the reusable
+pre-releases, then builds the 4.22-c9s, 4.22-c10s, and 4.20-c9s targets. If a
+matching `stream-coreos` image is present in a release payload, the reusable
 [`build-okd-stream-coreos.yml`](.github/workflows/build-okd-stream-coreos.yml)
 workflow uses it as the input and only applies the kernel/GCC overlay. It
 prepares the source-image decision and fallback compose in separate jobs, so a
-matching upstream image skips composition. If a c9s image is missing, it
-composes from the latest `scos-base:c9s` and matching RPM artifacts; a c10s
-variant without an upstream image is skipped because no c10s base is built. The
-manual `rpm_run_id` input is needed only for c9s fallback composes; there is no
-repository-variable fallback.
+matching upstream image skips composition. If a c9s image is missing, it builds
+the matching RPMs in the same workflow run and composes from the latest
+`scos-base:c9s`; a c10s variant without an upstream image is skipped because no
+c10s base is built. The other release/base matrix entries remain commented out
+while testing.
+
+For custom-composed images other than 4.22/EL9, the stream overlay preserves
+the kernel already present in the composed image instead of running
+`rpm-ostree override replace` against the same base package versions. The
+driver-toolkit overlay uses that image's installed `kernel-core` version so its
+kernel development packages stay in sync. The 4.22/EL9 overlay behavior is
+unchanged.
 
 The workflow publishes `stream-coreos:<version>-<stream>` and
 `driver-toolkit:<version>-<stream>`. Each image records its release payload,
 source image version/digest/revision, and workflow revision in OCI labels. The
-RPM workflow now builds and tests packages for the same OKD and CentOS Stream
-matrix.
+RPM workflow accepts one version/EL target and optional SIG-build and
+install-test flags. The image workflow owns the `strategy.matrix` and passes
+each target to the reusable RPM workflow; standalone dispatch runs one target.
 
 The provider RPMs are correctly named `ecr-credential-provider`,
 `acr-credential-provider`, and `gcr-credential-provider`; their RPM metadata

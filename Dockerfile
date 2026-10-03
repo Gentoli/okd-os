@@ -4,26 +4,28 @@ FROM ${BASE_IMAGE}
 
 ARG STREAM_MAJOR=10
 ARG VERSION="6.12.0-250.el10"
+ARG REPLACE_KERNEL=true
 
-#Install hotfix rpm
 RUN set -eux; \
-    baseos="https://mirror.stream.centos.org/${STREAM_MAJOR}-stream/BaseOS/x86_64/os/Packages"; \
-    curl -fsSLo /tmp/kernel-$VERSION.x86_64.rpm "$baseos/kernel-$VERSION.x86_64.rpm"; \
-    curl -fsSLo /tmp/kernel-core-$VERSION.x86_64.rpm "$baseos/kernel-core-$VERSION.x86_64.rpm"; \
-    curl -fsSLo /tmp/kernel-modules-$VERSION.x86_64.rpm "$baseos/kernel-modules-$VERSION.x86_64.rpm"; \
-    curl -fsSLo /tmp/kernel-modules-core-$VERSION.x86_64.rpm "$baseos/kernel-modules-core-$VERSION.x86_64.rpm"; \
-    curl -fsSLo /tmp/kernel-modules-extra-$VERSION.x86_64.rpm "$baseos/kernel-modules-extra-$VERSION.x86_64.rpm"; \
-    rpm-ostree override replace \
-        /tmp/kernel-$VERSION.x86_64.rpm \
-        /tmp/kernel-core-$VERSION.x86_64.rpm \
-        /tmp/kernel-modules-$VERSION.x86_64.rpm \
-        /tmp/kernel-modules-core-$VERSION.x86_64.rpm \
-        /tmp/kernel-modules-extra-$VERSION.x86_64.rpm; \
-    rm -f \
-        /tmp/kernel-$VERSION.x86_64.rpm \
-        /tmp/kernel-core-$VERSION.x86_64.rpm \
-        /tmp/kernel-modules-$VERSION.x86_64.rpm \
-        /tmp/kernel-modules-core-$VERSION.x86_64.rpm \
-        /tmp/kernel-modules-extra-$VERSION.x86_64.rpm; \
+    if [ "$REPLACE_KERNEL" = true ]; then \
+        baseos="https://mirror.stream.centos.org/${STREAM_MAJOR}-stream/BaseOS/x86_64/os/Packages"; \
+        curl -fsSLo /tmp/kernel-$VERSION.x86_64.rpm "$baseos/kernel-$VERSION.x86_64.rpm"; \
+        curl -fsSLo /tmp/kernel-core-$VERSION.x86_64.rpm "$baseos/kernel-core-$VERSION.x86_64.rpm"; \
+        curl -fsSLo /tmp/kernel-modules-$VERSION.x86_64.rpm "$baseos/kernel-modules-$VERSION.x86_64.rpm"; \
+        curl -fsSLo /tmp/kernel-modules-core-$VERSION.x86_64.rpm "$baseos/kernel-modules-core-$VERSION.x86_64.rpm"; \
+        curl -fsSLo /tmp/kernel-modules-extra-$VERSION.x86_64.rpm "$baseos/kernel-modules-extra-$VERSION.x86_64.rpm"; \
+        rpm-ostree override replace \
+            /tmp/kernel-$VERSION.x86_64.rpm \
+            /tmp/kernel-core-$VERSION.x86_64.rpm \
+            /tmp/kernel-modules-$VERSION.x86_64.rpm \
+            /tmp/kernel-modules-core-$VERSION.x86_64.rpm \
+            /tmp/kernel-modules-extra-$VERSION.x86_64.rpm; \
+        rm -f \
+            /tmp/kernel-$VERSION.x86_64.rpm \
+            /tmp/kernel-core-$VERSION.x86_64.rpm \
+            /tmp/kernel-modules-$VERSION.x86_64.rpm \
+            /tmp/kernel-modules-core-$VERSION.x86_64.rpm \
+            /tmp/kernel-modules-extra-$VERSION.x86_64.rpm; \
+    fi; \
     rpm-ostree cleanup -m; \
     ostree container commit
