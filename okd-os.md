@@ -2,7 +2,7 @@
 
 ## Release matrix
 
-The scheduled/manual `scan-okd-releases.yml` workflow currently scans the
+The push/scheduled/manual `scan-okd-releases.yml` workflow currently scans the
 4.22-c9s, 4.22-c10s, and 4.20-c9s targets. It calls the reusable
 `build-okd-stream-coreos.yml` workflow for each target. A matching
 `stream-coreos` image in the release payload is reused and receives only the
@@ -224,7 +224,7 @@ the temporary artifact-download URL or at the ZIP itself.
 
 ## Current node-image workflow
 
-The scheduled/manual
+The push/scheduled/manual
 [`scan-okd-releases.yml`](.github/workflows/scan-okd-releases.yml) workflow
 scans stable releases at
 [okd-project/okd/releases](https://github.com/okd-project/okd/releases), ignoring
@@ -242,9 +242,9 @@ while testing.
 The workflow publishes `stream-coreos:<version>-<stream>` and
 `driver-toolkit:<version>-<stream>`. Each image records its release payload,
 source image version/digest/revision, and workflow revision in OCI labels. The
-RPM workflow is callable from the image workflow for only the version/EL pair
-required by a fallback compose; standalone runs retain the broader build/test
-workflow but use the same focused target set.
+RPM workflow accepts a caller-supplied JSON object with separate upstream, SIG,
+and test matrices. The image workflow supplies only the version/EL pair
+required by a fallback compose; standalone dispatch retains the focused matrix.
 
 The provider RPMs are correctly named `ecr-credential-provider`,
 `acr-credential-provider`, and `gcr-credential-provider`; their RPM metadata

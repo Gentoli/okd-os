@@ -71,7 +71,7 @@ jobs:
 
       - name: Resolve release images
         id: images
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RELEASE_IMAGE: ${{ inputs.release_image }}
           BASE_STREAM: ${{ inputs.base_stream }}
@@ -143,7 +143,8 @@ jobs:
               streamInfo = inspectImage(streamImage);
               if (streamInfo.stream !== baseStream) {
                 core.info(
-                  `Release stream-coreos is for ${streamInfo.stream}, not ${baseStream}.`
+                  `Release stream-coreos is for ${streamInfo.stream}, ` +
+                  `not ${baseStream}.`
                 );
                 streamImage = "";
                 streamInfo = {};
@@ -152,7 +153,8 @@ jobs:
             if (!streamImage) {
               if (baseStream === "c10s") {
                 core.info(
-                  "No matching c10s stream-coreos image; c10s has no base fallback."
+                  "No matching c10s stream-coreos image; " +
+                  "c10s has no base fallback."
                 );
                 skipBuild = true;
               } else {
@@ -164,7 +166,8 @@ jobs:
               dtkInfo = inspectImage(dtkImage);
               if (dtkInfo.stream && dtkInfo.stream !== baseStream) {
                 core.info(
-                  `Release driver-toolkit is for ${dtkInfo.stream}, not ${baseStream}.`
+                  `Release driver-toolkit is for ${dtkInfo.stream}, ` +
+                  `not ${baseStream}.`
                 );
                 dtkImage = "";
                 dtkInfo = {};
