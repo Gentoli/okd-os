@@ -54,8 +54,14 @@ jobs:
             const os = require("node:os");
             const path = require("node:path");
 
-            const plan = JSON.parse(fs.readFileSync(process.env.PLAN_FILE, "utf8"));
-            const githubUrl = `https://github.com/${process.env.GH_REPOSITORY}.git`;
+            const plan = JSON.parse(
+              fs.readFileSync(process.env.PLAN_FILE, "utf8"),
+            );
+            const githubUrl = [
+              "https://github.com/",
+              process.env.GH_REPOSITORY,
+              ".git",
+            ].join("");
             const mirrorUrl = plan.sources.mirror_url_pattern.replace(
               "{repository}",
               process.env.GH_REPOSITORY,
@@ -73,8 +79,9 @@ jobs:
                 }).trimEnd();
               } catch (error) {
                 if (allowFailure) return "";
+                const detail = error.stderr?.toString() ?? error.message;
                 throw new Error(
-                  `git ${args.join(" ")} failed: ${error.stderr?.toString() ?? error.message}`,
+                  `git ${args.join(" ")} failed: ${detail}`,
                 );
               }
             }
@@ -113,7 +120,9 @@ jobs:
                   .map((match) => [match[1], match[2]]),
               );
               function field(name) {
-                const match = spec.match(new RegExp(`^${name}:\\s*(\\S+)`, "m"));
+                const match = spec.match(
+                  new RegExp(`^${name}:\\s*(\\S+)`, "m"),
+                );
                 if (!match) throw new Error(`Spec missing ${name}: field`);
                 let value = match[1];
                 for (let i = 0; i < 10; i++) {
@@ -134,11 +143,15 @@ jobs:
 
             function patchId(sourceVersion, packageName, targetVersion) {
               const safe = (value) => value.replace(/[^A-Za-z0-9_.]+/g, "_");
-              return `source_${safe(sourceVersion)}_package_${safe(packageName)}_target_${safe(targetVersion)}`;
+              return `source_${safe(sourceVersion)}` +
+                `_package_${safe(packageName)}` +
+                `_target_${safe(targetVersion)}`;
             }
 
             function inspect(row, metadataFile) {
-              const temp = fs.mkdtempSync(path.join(os.tmpdir(), "rpm-mirror-"));
+              const temp = fs.mkdtempSync(
+                path.join(os.tmpdir(), "rpm-mirror-"),
+              );
               try {
                 git(["init", "--quiet", temp], temp);
                 git(["remote", "add", "upstream", row.source_url], temp);
@@ -184,7 +197,8 @@ jobs:
                       marker?.match(/^Patch-ID:\s*(\S+)/m)?.[1] ?? "";
                     if (!bootstrapOnly && !markerPatchId) {
                       throw new Error(
-                        `${row.target_branch} has neither ${metadataFile} nor a PATCH marker`,
+                        `${row.target_branch} has neither ${metadataFile} ` +
+                          "nor a PATCH marker",
                       );
                     }
                   } else {
@@ -206,7 +220,9 @@ jobs:
                       metadata.spec,
                     ];
                     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-                      throw new Error(`Metadata mismatch on ${row.target_branch}`);
+                      throw new Error(
+                        `Metadata mismatch on ${row.target_branch}`,
+                      );
                     }
                   }
                   missingCommits = git(["cherry", targetRef, sourceRef], temp)
@@ -318,14 +334,17 @@ jobs:
                   version,
                 );
                 if (!branchSha(sourceUrl, sourceBranch)) {
-                  throw new Error(`Missing shared upstream branch ${sourceBranch}`);
+                  throw new Error(
+                    `Missing shared upstream branch ${sourceBranch}`,
+                  );
                 }
               } else {
                 const fallbackPattern =
                   plan.sources.fallback_branch_patterns?.[project]?.[osVersion];
                 if (!fallbackPattern) {
                   throw new Error(
-                    `No exact source branch or fallback for ${project} EL${osVersion} OKD ${version}`,
+                    `No exact source branch or fallback for ${project} ` +
+                      `EL${osVersion} OKD ${version}`,
                   );
                 }
                 sourceBranch = format(
@@ -335,7 +354,9 @@ jobs:
                   version,
                 );
                 if (!branchSha(sourceUrl, sourceBranch)) {
-                  throw new Error(`Missing fallback branch ${sourceBranch}`);
+                  throw new Error(
+                    `Missing fallback branch ${sourceBranch}`,
+                  );
                 }
               }
               mirror = inspect({
