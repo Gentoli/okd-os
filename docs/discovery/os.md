@@ -150,9 +150,8 @@ does not claim to be a clean upstream build.
   `c9s` variant with COSA.
   Pushes run on `main` when the workflow or base files change. Workflow
   dispatch accepts an upstream config ref (default `HEAD`) and publishes
-  `scos-base:c9s` and `scos-base:c9s-vm`. The QEMU disk is published in GHCR
-  as `scos-base:c9s-qemu-<run-id>`. Published images include source revision
-  labels.
+  `scos-base:c9s` as the SCOS OCI base and `scos-base:c9s-vm` as the QEMU VM
+  image containing the disk. The SCOS OCI base includes source revision labels.
 - `docker/login-action` provides the GHCR credentials used when publishing.
   The action's post-job cleanup logs out at the end of the job.
 - The COSA job container requires a runner with `/dev/kvm`; the workflow fails

@@ -10,10 +10,6 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      scos_run_id:
-        description: Successful SCOS base workflow run ID for the GHCR QEMU image
-        required: true
-        type: string
       oci_image_ref:
         description: Full GHCR image pullspec (tag or sha256 digest)
         required: true
@@ -94,21 +90,17 @@ jobs:
       - name: Select image references and SCOS base run
         id: test-inputs
         env:
-          INPUT_SCOS_RUN_ID: ${{ inputs.scos_run_id }}
           INPUT_OKD_IMAGE_REF: ${{ inputs.oci_image_ref }}
           INPUT_RELEASE_IMAGE: ${{ inputs.release_image }}
-          CONFIGURED_SCOS_RUN_ID: ${{ vars.OKD_SCOS_BASE_RUN_ID }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
-            scos_run_id="$CONFIGURED_SCOS_RUN_ID"
             oci_image_ref="$DEFAULT_OKD_IMAGE_REF"
             release_version=4.22
             test_version=4.22
             kola_stream=4.22-c9s
             release_image=""
           else
-            scos_run_id="$INPUT_SCOS_RUN_ID"
             oci_image_ref="$INPUT_OKD_IMAGE_REF"
             release_image="$INPUT_RELEASE_IMAGE"
             kola_stream=4.22-c9s
@@ -148,7 +140,6 @@ jobs:
           echo "oci_image_ref=$oci_image_ref" >> "$GITHUB_OUTPUT"
           echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
           echo "release_image=$release_image" >> "$GITHUB_OUTPUT"
-          echo "scos_run_id=$scos_run_id" >> "$GITHUB_OUTPUT"
           echo "kola_stream=$kola_stream" >> "$GITHUB_OUTPUT"
           echo "test_version=$test_version" >> "$GITHUB_OUTPUT"
 
@@ -202,18 +193,12 @@ jobs:
       - name: Resolve upstream stream-coreos image
         id: upstream-image
         env:
-          INPUT_SCOS_RUN_ID: ${{ steps.test-inputs.outputs.scos_run_id }}
           INPUT_OKD_IMAGE_REF: ${{ steps.test-inputs.outputs.oci_image_ref }}
           INPUT_RELEASE_IMAGE: >-
             ${{ steps.test-inputs.outputs.release_image ||
                 steps.stable-release.outputs.release_image }}
         run: |
           set -euo pipefail
-          if [[ ! "$INPUT_SCOS_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
-            echo "Set scos_run_id or the OKD_SCOS_BASE_RUN_ID repository variable" \
-              "to a successful SCOS base workflow run ID." >&2
-            exit 1
-          fi
           for image_ref in "$INPUT_OKD_IMAGE_REF" "$INPUT_RELEASE_IMAGE"; do
             if [[ ! "$image_ref" =~ ^[^[:space:]\|]+$ ||
               "$image_ref" == docker://* ]]; then
@@ -271,11 +256,10 @@ jobs:
       - name: Pull SCOS QEMU base image
         env:
           IMAGE_OWNER: ${{ github.repository_owner }}
-          SCOS_RUN_ID: ${{ steps.test-inputs.outputs.scos_run_id }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/scos-qemu"
-          image_ref="ghcr.io/${IMAGE_OWNER,,}/scos-base:c9s-qemu-${SCOS_RUN_ID}"
+          image_ref="ghcr.io/${IMAGE_OWNER,,}/scos-base:c9s-vm"
           podman pull "$image_ref"
           container_id=$(podman create "$image_ref")
           trap 'podman rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
