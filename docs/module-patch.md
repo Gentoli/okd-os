@@ -2,9 +2,11 @@
 
 `rpms/mirror-plan.json` defines build targets and source-branch patterns. Mirror
 metadata is stored in `.rpm-mirror.json` on the corresponding mirror branch,
-not on `main`. Source selection runs before the reusable `rpm-build.yml`
-workflow; the RPM build receives resolved URLs and branch names and does not
-probe upstream branches or synthesize fallback patches.
+not on `main`. `scan-okd-releases.yml` resolves and updates sources before it
+composes release build configurations and calls
+`build-okd-stream-coreos.yml`. That reusable image workflow receives resolved
+source URLs and branches; each source must already exist upstream or in this
+repository. It does not plan or probe RPM sources.
 
 ## Mirror branch layout
 
@@ -40,9 +42,12 @@ mirror freshness using Git's patch-equivalence check. The planner skips when
 direct source branches suffice or all selected mirrors are current; otherwise
 it passes the stale mirror list to one `sync-rpm-mirror.yml` reusable-workflow
 call. Both mirror workflows are reusable-only, and sync does not repeat source
-planning. The release-build matrix waits for planning and any required sync.
-Each target combination reaches its RPM build only once through the reusable
-image workflow; `reproduce-rpm-build.yml` is the manual RPM-build entry point.
+planning. After the sync completes, the scan resolves source URLs and branches
+for the selected target combinations, then composes the release build
+configurations with those sources. The release-build matrix waits for that
+configuration step. Each target combination reaches its RPM build only once
+through the reusable image workflow; `reproduce-rpm-build.yml` is the manual
+RPM-build entry point.
 The sync workflow uses a single job: a GitHub Script step
 creates mirror worktrees and metadata, Copilot CLI replays missing commits and
 recreates the documented package patch using
