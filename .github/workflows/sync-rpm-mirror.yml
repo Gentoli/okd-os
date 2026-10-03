@@ -370,19 +370,32 @@ jobs:
                 if (!currentConflict()) return;
                 askCopilot(
                   "Resolve the active upstream cherry-pick conflict using " +
-                    "the attached instruction and context. Edit only files " +
+                    "the attached instruction and context. Edit only the " +
+                    "conflicted files " +
                     "needed for this mirror; do not run shell commands or " +
                     "stage or continue the cherry-pick.",
                 );
+                const conflictedFiles = git([
+                  "diff", "--name-only", "--diff-filter=U",
+                ], mirror.worktree).split("\n").filter(Boolean);
+                const markersRemaining = conflictedFiles.filter((file) =>
+                  fs.existsSync(`${mirror.worktree}/${file}`) &&
+                    /^(<<<<<<< |=======$|>>>>>>> )/m.test(
+                      fs.readFileSync(
+                        `${mirror.worktree}/${file}`,
+                        "utf8",
+                      ),
+                    )
+                );
+                git(["add", "--", ...conflictedFiles], mirror.worktree);
                 const unresolved = git([
                   "diff", "--name-only", "--diff-filter=U",
                 ], mirror.worktree);
-                if (unresolved) {
+                if (unresolved || markersRemaining.length) {
                   throw new Error(
                     `Copilot left unresolved conflicts in ${mirror.target_branch}`,
                   );
                 }
-                git(["add", "-A"], mirror.worktree);
                 git(
                   ["cherry-pick", "--continue"],
                   mirror.worktree,
@@ -408,6 +421,74 @@ jobs:
                 `${mirror.worktree}/${mirror.spec}`,
                 "utf8",
               );
+              let expectedSpec = mirror.source_spec;
+              if (
+                mirror.project === "cri-o" &&
+                String(mirror.target_el) === "9"
+              ) {
+                if (
+                  !/^Suggests:\s+containernetworking-plugins\b/m.test(
+                    expectedSpec,
+                  )
+                ) {
+                  const recommendation = expectedSpec.match(
+                    /^Recommends:.*$/m,
+                  );
+                  if (!recommendation) {
+                    throw new Error("CRI-O source spec has no Recommends line");
+                  }
+                  expectedSpec = expectedSpec.replace(
+                    recommendation[0],
+                    `${recommendation[0]}\nSuggests:       containernetworking-plugins >= 1.0.0-1`,
+                  );
+                }
+                if (
+                  !/^\s*--cni-plugin-dir "%\{_libexecdir\}\/cni" \\$/m.test(
+                    expectedSpec,
+                  )
+                ) {
+                  const pluginDir = expectedSpec.match(
+                    /^([ \t]*)--cni-plugin-dir \/opt\/cni\/bin[ \t]*\\$/m,
+                  );
+                  if (!pluginDir) {
+                    throw new Error(
+                      "CRI-O source spec has no /opt/cni/bin setting",
+                    );
+                  }
+                  expectedSpec = expectedSpec.replace(
+                    pluginDir[0],
+                    `${pluginDir[0]}\n${pluginDir[1]}--cni-plugin-dir "%{_libexecdir}/cni" \\`,
+                  );
+                }
+              }
+              const sourceReleases = [
+                ...expectedSpec.matchAll(/^Release:\s*(\S+)/gm),
+              ];
+              if (sourceReleases.length !== 1) {
+                throw new Error(
+                  `Expected one Release field in ${mirror.spec}`,
+                );
+              }
+              const baseRelease = sourceReleases[0][1].replace(
+                /\.fallback\.[^%\s]+/g,
+                "",
+              );
+              const expectedSuffix = `.fallback.${mirror.patch_id}`;
+              const release = baseRelease.includes("%{?dist}")
+                ? baseRelease.replace(
+                    "%{?dist}",
+                    `${expectedSuffix}%{?dist}`,
+                  )
+                : `${baseRelease}${expectedSuffix}`;
+              expectedSpec = expectedSpec.replace(
+                /^(Release:\s*)\S+/m,
+                (_match, prefix) => `${prefix}${release}`,
+              );
+              if (spec !== expectedSpec) {
+                throw new Error(
+                  `Copilot produced changes outside the allowed RPM spec patch for ${mirror.spec}`,
+                );
+              }
               const metadata = JSON.parse(fs.readFileSync(
                 `${mirror.worktree}/.rpm-mirror.json`,
                 "utf8",
@@ -467,6 +548,11 @@ jobs:
                 ["diff", "--cached", "--name-only", "-z"],
                 { cwd: mirror.worktree, encoding: "utf8" },
               ).split("\0").filter(Boolean);
+              const unstagedFiles = execFileSync(
+                "git",
+                ["diff", "--name-only", "-z"],
+                { cwd: mirror.worktree, encoding: "utf8" },
+              ).split("\0").filter(Boolean);
               const untrackedFiles = execFileSync(
                 "git",
                 ["ls-files", "--others", "--exclude-standard", "-z"],
@@ -480,6 +566,7 @@ jobs:
                 ...new Set([
                   ...changedFiles,
                   ...stagedFiles,
+                  ...unstagedFiles,
                   ...untrackedFiles,
                 ]),
               ].filter((file) => !allowedFiles.has(file));
@@ -498,7 +585,24 @@ jobs:
                   `${mirror.target_branch} still lacks upstream commits`,
                 );
               }
-              execFileSync("git", ["add", "-A"], { cwd: mirror.worktree });
+              execFileSync(
+                "git",
+                ["add", "-A", "--", mirror.spec, ".rpm-mirror.json"],
+                { cwd: mirror.worktree },
+              );
+              const stagedPaths = execFileSync(
+                "git",
+                ["diff", "--cached", "--name-only", "-z"],
+                { cwd: mirror.worktree, encoding: "utf8" },
+              ).split("\0").filter(Boolean);
+              const unexpectedStaged = stagedPaths.filter(
+                (file) => !allowedFiles.has(file),
+              );
+              if (unexpectedStaged.length) {
+                throw new Error(
+                  `Unexpected staged mirror changes: ${unexpectedStaged.join(", ")}`,
+                );
+              }
               try {
                 execFileSync(
                   "git",

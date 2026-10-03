@@ -47,6 +47,10 @@ with `push-signed-commits`. The job has `contents: write` and
 reasoning effort. The organization must allow Copilot CLI requests billed to
 the organization. A new mirror branch is seeded with the upstream tip before
 the workflow's signed marker and compatibility commits are published.
+Copilot has file-write access but no shell access. Before signing, the workflow
+checks that the spec exactly matches the source plus the deterministic Release
+suffix and, for CRI-O EL9, only the documented CNI additions; it also rejects
+unexpected files or changed branch metadata.
 
 Updates append cherry-picked upstream changes to the mirror, retaining each
 change's patch equivalence. The branch-local `.rpm-mirror.json` records the
