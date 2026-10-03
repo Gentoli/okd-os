@@ -114,6 +114,7 @@ jobs:
 
       - name: Prepare mirror worktree and replay upstream commits
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           INSPECTION: ${{ needs.inspect.outputs.result }}
           MIRROR_CREATED: ${{ needs.bootstrap.outputs.created }}
           GH_REPOSITORY: ${{ github.repository }}
@@ -152,7 +153,7 @@ jobs:
             exit 1
           fi
 
-          mirror_dir="$RUNNER_TEMP/rpm-mirror"
+          mirror_dir="$GITHUB_WORKSPACE/.rpm-mirror"
           artifact_dir="$RUNNER_TEMP/rpm-mirror-artifact"
           mkdir -p "$artifact_dir/series"
           git worktree add --detach "$mirror_dir" "$current_target_sha"
@@ -210,16 +211,17 @@ jobs:
           as required to resolve conflicts.
           EOF
 
-          GITHUB_TOKEN="${{ github.token }}" \
-            copilot -p "$(cat "$RUNNER_TEMP/copilot-prompt.md")" \
-              --allow-tool='shell(git:*)' -s
+          copilot -p "$(cat "$RUNNER_TEMP/copilot-prompt.md")" \
+            --allow-tool='shell(git:*)' -s
 
-          if test -f "$mirror_dir/.git/CHERRY_PICK_HEAD" ||
+          git_dir=$(git -C "$mirror_dir" rev-parse --git-dir)
+          if git -C "$mirror_dir" rev-parse --verify -q \
+            CHERRY_PICK_HEAD >/dev/null ||
             [[ -n "$(git -C "$mirror_dir" diff --name-only --diff-filter=U)" ]]; then
             echo "Copilot left an unresolved cherry-pick." >&2
             exit 1
           fi
-          if git cherry "$current_target_sha" "$current_source_sha" |
+          if git -C "$mirror_dir" cherry HEAD "$current_source_sha" |
             grep -q '^+'; then
             echo "Mirror is missing an upstream commit after Copilot run." >&2
             exit 1
@@ -291,6 +293,11 @@ jobs:
           if [[ "$actual_sha" != "$expected_sha" ]]; then
             echo "Mirror branch changed while Copilot prepared the patch." >&2
             exit 1
+          fi
+          git fetch --no-tags origin \
+            "refs/heads/$target_branch:refs/remotes/origin/rpm-mirror"
+          if [[ "$MIRROR_CREATED" == "true" ]]; then
+            git switch --detach refs/remotes/origin/rpm-mirror
           fi
 
       - name: Add signed mirror marker

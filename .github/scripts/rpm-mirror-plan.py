@@ -19,7 +19,7 @@ def run(*args, cwd=None, check=True):
 
 
 def safe_id(value):
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    return re.sub(r"[^A-Za-z0-9_.]+", "_", value)
 
 
 def rpm_identity(spec):
