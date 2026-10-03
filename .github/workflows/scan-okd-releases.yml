@@ -6,8 +6,6 @@ on:
       - .github/workflows/build-okd-stream-coreos.yml
       - .github/workflows/rpm-build.yml
       - .github/workflows/scan-okd-releases.yml
-      - .github/actions/plan-rpm-mirrors/action.yml
-      - .github/actions/resolve-rpm-sources/action.yml
       - .github/prompts/rpm-mirror-maintenance.md
       - .github/workflows/prepare-rpm-sources.yml
       - .github/workflows/sync-rpm-mirror.yml
