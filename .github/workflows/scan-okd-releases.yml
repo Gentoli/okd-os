@@ -23,19 +23,24 @@ jobs:
     outputs:
       matrix: ${{ steps.releases.outputs.matrix }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Find the latest stable OKD release payloads
         id: releases
         uses: actions/github-script@v9
         with:
           script: |
-            const targets = [
-              { version: "4.22", base: "c9s" },
-              { version: "4.22", base: "c10s" },
-              { version: "4.20", base: "c9s" },
-              // { version: "4.20", base: "c10s" },
-              // { version: "4.21", base: "c9s" },
-              // { version: "4.21", base: "c10s" },
-            ];
+            const plan = require(
+              `${process.env.GITHUB_WORKSPACE}/rpms/mirror-plan.json`
+            );
+            const targets = plan.build_targets.map((target) => ({
+              version: target.okd_version,
+              base: target.base,
+              os_version: target.os_version,
+              run_test: target.run_test,
+              repo_version: target.repo_version,
+            }));
             const versions = [
               ...new Set(targets.map(({ version }) => version)),
             ];
@@ -93,7 +98,8 @@ jobs:
             }
 
             const matrix = [];
-            for (const { version, base } of targets) {
+            for (const target of targets) {
+              const { version, base } = target;
               const release = latestReleases[version];
               const { data: commit } = await github.rest.repos.getCommit({
                 owner: "okd-project",
@@ -107,23 +113,13 @@ jobs:
                 release_image: release.image,
                 release_commit: commit.sha,
                 base,
-                os_major: base.match(/^c(\d+)s$/)[1],
+                os_major: target.os_version,
                 rpm_targets: JSON.stringify([{
-                    okd_version: version,
-                    os_version: base.match(/^c(\d+)s$/)[1],
-                    run_test:
-                      (version === "4.22" &&
-                        (base === "c10s" || base === "c9s")) ||
-                      (version === "4.20" && base === "c9s"),
-                  }]),
-                repo_version:
-                  base === "c10s"
-                    ? "10.0"
-                    : version === "4.20"
-                      ? "9.6"
-                      : version === "4.21"
-                        ? "9.7"
-                        : "9.8",
+                  okd_version: version,
+                  os_version: target.os_version,
+                  run_test: target.run_test,
+                }]),
+                repo_version: target.repo_version,
               });
             }
             core.setOutput("matrix", JSON.stringify(matrix));

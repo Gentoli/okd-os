@@ -1,0 +1,366 @@
+name: Sync RPM mirror branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      mirror_id:
+        description: RPM mirror from rpms/mirror-plan.json
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rpm-mirror-${{ inputs.mirror_id }}
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.inspect.outputs.result }}
+      needs_sync: ${{ steps.inspect.outputs.needs_sync }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Recheck source and mirror commits
+        id: inspect
+        env:
+          GH_REPOSITORY: ${{ github.repository }}
+          MIRROR_ID: ${{ inputs.mirror_id }}
+        run: |
+          set -euo pipefail
+          result=$(python3 .github/scripts/rpm-mirror-plan.py \
+            --plan rpms/mirror-plan.json \
+            --repository "$GH_REPOSITORY" \
+            --mirror-id "$MIRROR_ID")
+          needs_sync=$(jq -r '.[0].needs_sync' <<< "$result")
+          echo "Mirror status: $result"
+          echo "result=$result" >> "$GITHUB_OUTPUT"
+          echo "needs_sync=$needs_sync" >> "$GITHUB_OUTPUT"
+
+  bootstrap:
+    needs: inspect
+    if: needs.inspect.outputs.needs_sync == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      created: ${{ steps.seed.outputs.created }}
+      base_sha: ${{ steps.seed.outputs.base_sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize a missing mirror at its upstream tip
+        id: seed
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          INSPECTION: ${{ needs.inspect.outputs.result }}
+        run: |
+          set -euo pipefail
+          target_branch=$(jq -r '.[0].target_branch' <<< "$INSPECTION")
+          source_branch=$(jq -r '.[0].source_branch' <<< "$INSPECTION")
+          source_url=$(jq -r \
+            --arg id "$(jq -r '.[0].mirror_id' <<< "$INSPECTION")" \
+            '.mirrors[] | select(.id == $id) | .source_url' \
+            rpms/mirror-plan.json)
+          remote_branch=$(git ls-remote --heads origin \
+            "refs/heads/$target_branch")
+          if [[ -n "$remote_branch" ]]; then
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            echo "base_sha=$(cut -f1 <<< "$remote_branch")" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags "$source_url" \
+            "refs/heads/$source_branch:refs/remotes/rpm-upstream/source"
+          source_sha=$(git rev-parse refs/remotes/rpm-upstream/source)
+          auth=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          if ! git -c \
+            "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push "https://github.com/$GH_REPOSITORY.git" \
+            "$source_sha:refs/heads/$target_branch"; then
+            echo "Could not create RPM mirror branch $target_branch." >&2
+            exit 1
+          fi
+          echo "created=true" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  copilot:
+    needs:
+      - inspect
+      - bootstrap
+    if: needs.inspect.outputs.needs_sync == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      copilot-requests: write
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Copilot CLI
+        run: npm install --global @github/copilot@1.0.91
+
+      - name: Prepare mirror worktree and replay upstream commits
+        env:
+          INSPECTION: ${{ needs.inspect.outputs.result }}
+          MIRROR_CREATED: ${{ needs.bootstrap.outputs.created }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mirror_id=$(jq -r '.[0].mirror_id' <<< "$INSPECTION")
+          source_branch=$(jq -r '.[0].source_branch' <<< "$INSPECTION")
+          target_branch=$(jq -r '.[0].target_branch' <<< "$INSPECTION")
+          source_url=$(jq -r --arg id "$mirror_id" \
+            '.mirrors[] | select(.id == $id) | .source_url' \
+            rpms/mirror-plan.json)
+          source_sha=$(jq -r '.[0].source_sha' <<< "$INSPECTION")
+          target_sha=$(jq -r '.[0].target_sha' <<< "$INSPECTION")
+          marker_patch_id=$(jq -r '.[0].marker_patch_id' <<< "$INSPECTION")
+          if [[ "$MIRROR_CREATED" != "true" && -z "$marker_patch_id" ]]; then
+            echo "Existing mirror $target_branch has no PATCH marker." >&2
+            echo "Recreate the mirror branch from its upstream source first." >&2
+            exit 1
+          fi
+
+          git remote add rpm-upstream "$source_url"
+          git fetch --no-tags rpm-upstream \
+            "refs/heads/$source_branch:refs/remotes/rpm-upstream/source"
+          current_source_sha=$(git rev-parse refs/remotes/rpm-upstream/source)
+          git fetch --no-tags origin \
+            "refs/heads/$target_branch:refs/remotes/origin/rpm-mirror"
+          current_target_sha=$(git rev-parse refs/remotes/origin/rpm-mirror)
+          if [[ "$current_target_sha" != "$target_sha" &&
+            "$MIRROR_CREATED" != "true" ]]; then
+            echo "Mirror branch changed after planning; retry the sync." >&2
+            exit 1
+          fi
+          if [[ "$MIRROR_CREATED" == "true" &&
+            "$current_target_sha" != "${{ needs.bootstrap.outputs.base_sha }}" ]]; then
+            echo "New mirror branch changed after initialization." >&2
+            exit 1
+          fi
+
+          mirror_dir="$RUNNER_TEMP/rpm-mirror"
+          artifact_dir="$RUNNER_TEMP/rpm-mirror-artifact"
+          mkdir -p "$artifact_dir/series"
+          git worktree add --detach "$mirror_dir" "$current_target_sha"
+          git -C "$mirror_dir" config user.name "Copilot RPM Mirror"
+          git -C "$mirror_dir" config user.email \
+            "copilot-rpm-mirror@users.noreply.github.com"
+
+          mapfile -t missing_commits < <(
+            jq -r '.[0].missing_commits[]' <<< "$INSPECTION"
+          )
+          for commit in "${missing_commits[@]}"; do
+            if ! git -C "$mirror_dir" cherry-pick "$commit"; then
+              echo "Cherry-pick needs conflict resolution: $commit"
+              break
+            fi
+          done
+
+          cat > "$RUNNER_TEMP/rpm-mirror-context.json" <<EOF
+          {
+            "mirror_id": "$mirror_id",
+            "package": "$(jq -r '.[0].package_name' <<< "$INSPECTION")",
+            "source_version": "$(jq -r '.[0].source_version' <<< "$INSPECTION")",
+            "target_version": "$(jq -r \
+              --arg id "$mirror_id" \
+              '.mirrors[] | select(.id == $id) | .target_version' \
+              rpms/mirror-plan.json)",
+            "source_branch": "$source_branch",
+            "target_branch": "$target_branch",
+            "source_sha": "$current_source_sha",
+            "target_sha": "$current_target_sha",
+            "patch_id": "$(jq -r '.[0].patch_id' <<< "$INSPECTION")",
+            "new_mirror": "$MIRROR_CREATED"
+          }
+          EOF
+
+          cat > "$RUNNER_TEMP/copilot-prompt.md" <<EOF
+          Maintain the RPM mirror in $mirror_dir. Read
+          $GITHUB_WORKSPACE/docs/module-patch.md and
+          $RUNNER_TEMP/rpm-mirror-context.json first.
+
+          The current upstream branch is $source_branch and the mirror is
+          $target_branch. Upstream commits missing from the mirror have been
+          cherry-picked already; if a cherry-pick is in progress, resolve its
+          conflicts while preserving the upstream change and the documented
+          EL-specific patch, then finish it with git add and git
+          cherry-pick --continue. Verify every upstream commit is represented
+          before finishing.
+
+          Recreate or refresh only the package compatibility patch documented
+          in module-patch.md. For cri-o on EL9, preserve the EL9 CNI dependency
+          and plugin directory settings. For packages with no documented
+          compatibility changes, do not invent changes. Do not modify workflow
+          files or other packages. Do not create commits for patch edits; leave
+          those changes in the worktree. Cherry-pick commits may be completed
+          as required to resolve conflicts.
+          EOF
+
+          GITHUB_TOKEN="${{ github.token }}" \
+            copilot -p "$(cat "$RUNNER_TEMP/copilot-prompt.md")" \
+              --allow-tool='shell(git:*)' -s
+
+          if test -f "$mirror_dir/.git/CHERRY_PICK_HEAD" ||
+            [[ -n "$(git -C "$mirror_dir" diff --name-only --diff-filter=U)" ]]; then
+            echo "Copilot left an unresolved cherry-pick." >&2
+            exit 1
+          fi
+          if git cherry "$current_target_sha" "$current_source_sha" |
+            grep -q '^+'; then
+            echo "Mirror is missing an upstream commit after Copilot run." >&2
+            exit 1
+          fi
+
+          git -C "$mirror_dir" format-patch --binary --full-index \
+            --no-signature --quiet \
+            --output-directory "$artifact_dir/series" \
+            "$current_target_sha..HEAD"
+          git -C "$mirror_dir" diff --binary HEAD \
+            > "$artifact_dir/working-tree.patch"
+          printf '%s\n' "$INSPECTION" > "$artifact_dir/inspection.json"
+          printf '%s\n' "$MIRROR_CREATED" > "$artifact_dir/new-mirror"
+
+      - name: Set artifact name
+        id: artifact
+        env:
+          INSPECTION: ${{ needs.inspect.outputs.result }}
+        run: |
+          echo "name=rpm-mirror-$(jq -r '.[0].mirror_id' \
+            <<< "$INSPECTION")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload mirror patch series
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ runner.temp }}/rpm-mirror-artifact/
+          if-no-files-found: error
+
+  publish:
+    needs:
+      - inspect
+      - bootstrap
+      - copilot
+    if: needs.inspect.outputs.needs_sync == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download Copilot patch series
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.copilot.outputs.artifact_name }}
+          path: ${{ runner.temp }}/rpm-mirror-artifact
+
+      - name: Create the signed marker and apply the patch series
+        env:
+          INSPECTION: ${{ needs.inspect.outputs.result }}
+          MIRROR_CREATED: ${{ needs.bootstrap.outputs.created }}
+          BOOTSTRAP_BASE_SHA: ${{ needs.bootstrap.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          mirror_id=$(jq -r '.[0].mirror_id' <<< "$INSPECTION")
+          target_branch=$(jq -r '.[0].target_branch' <<< "$INSPECTION")
+          source_branch=$(jq -r '.[0].source_branch' <<< "$INSPECTION")
+          expected_sha=$(jq -r '.[0].target_sha' <<< "$INSPECTION")
+          patch_id=$(jq -r '.[0].patch_id' <<< "$INSPECTION")
+          if [[ "$MIRROR_CREATED" == "true" ]]; then
+            expected_sha="$BOOTSTRAP_BASE_SHA"
+          fi
+
+          actual_sha=$(git ls-remote --heads origin \
+            "refs/heads/$target_branch" | cut -f1)
+          if [[ "$actual_sha" != "$expected_sha" ]]; then
+            echo "Mirror branch changed while Copilot prepared the patch." >&2
+            exit 1
+          fi
+
+      - name: Add signed mirror marker
+        if: needs.bootstrap.outputs.created == 'true'
+        uses: pgaskin/push-signed-commits@v1.2.1
+        with:
+          repository: ${{ github.repository }}
+          branch: ${{ fromJSON(needs.inspect.outputs.result)[0].target_branch }}
+          allow-empty: true
+          commit-message: |
+            PATCH/${{ fromJSON(needs.inspect.outputs.result)[0].source_branch }}
+
+            Patch-ID: ${{ fromJSON(needs.inspect.outputs.result)[0].patch_id }}
+
+      - name: Apply and sign the prepared commits
+        env:
+          INSPECTION: ${{ needs.inspect.outputs.result }}
+          MIRROR_CREATED: ${{ needs.bootstrap.outputs.created }}
+          BOOTSTRAP_BASE_SHA: ${{ needs.bootstrap.outputs.base_sha }}
+        id: prepared
+        run: |
+          set -euo pipefail
+          target_branch=$(jq -r '.[0].target_branch' <<< "$INSPECTION")
+          expected_sha=$(jq -r '.[0].target_sha' <<< "$INSPECTION")
+          if [[ "$MIRROR_CREATED" == "true" ]]; then
+            expected_sha="$BOOTSTRAP_BASE_SHA"
+          fi
+
+          git fetch --no-tags origin \
+            "refs/heads/$target_branch:refs/remotes/origin/rpm-mirror"
+          if [[ "$MIRROR_CREATED" == "true" ]]; then
+            marker_sha=$(git rev-parse refs/remotes/origin/rpm-mirror)
+            marker_subject=$(git show -s --format=%s "$marker_sha")
+            expected_marker="PATCH/$(jq -r '.[0].source_branch' <<< "$INSPECTION")"
+            if [[ "$marker_subject" != "$expected_marker" ]]; then
+              echo "The mirror branch marker was not created as expected." >&2
+              exit 1
+            fi
+          elif [[ "$(git rev-parse refs/remotes/origin/rpm-mirror)" != \
+            "$expected_sha" ]]; then
+            echo "Mirror branch changed before publishing." >&2
+            exit 1
+          fi
+
+          git switch --detach refs/remotes/origin/rpm-mirror
+          mapfile -t series < <(
+            find "$RUNNER_TEMP/rpm-mirror-artifact/series" \
+              -maxdepth 1 -type f -name '*.patch' -print | sort
+          )
+          if (( ${#series[@]} > 0 )); then
+            git am --3way "${series[@]}"
+          fi
+          working_tree_patch="$RUNNER_TEMP/rpm-mirror-artifact/working-tree.patch"
+          if [[ -s "$working_tree_patch" ]]; then
+            git apply --index --binary "$working_tree_patch"
+            git commit -m "Update $(jq -r '.[0].package_name' \
+              <<< "$INSPECTION") compatibility patch"
+          fi
+
+          if [[ "$(git rev-parse HEAD)" == \
+            "$(git rev-parse refs/remotes/origin/rpm-mirror)" ]]; then
+            echo "has_commits=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_commits=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push signed RPM mirror commits
+        if: steps.prepared.outputs.has_commits == 'true'
+        uses: pgaskin/push-signed-commits@v1.2.1
+        with:
+          repository: ${{ github.repository }}
+          branch: ${{ fromJSON(needs.inspect.outputs.result)[0].target_branch }}
+          revision: refs/remotes/origin/rpm-mirror..HEAD

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import hashlib
 import json
 import re
 import subprocess
@@ -95,7 +94,7 @@ def latest_patch_id(repo, mirror_ref, source_branch):
     return ""
 
 
-def check_mirror(row, github_repository, plan_path, docs_path):
+def check_mirror(row, github_repository):
     if not row["target_branch"].startswith("rpms/"):
         raise ValueError(
             f"mirror branch must be under rpms/: {row['target_branch']}"
@@ -131,6 +130,11 @@ def check_mirror(row, github_repository, plan_path, docs_path):
             cwd=repo,
             check=False,
         )
+        if branch.returncode != 0:
+            raise RuntimeError(
+                f"Could not inspect mirror branch {row['target_branch']}: "
+                f"{branch.stderr.strip()}"
+            )
         target_exists = branch.returncode == 0 and bool(branch.stdout.strip())
         target_sha = ""
         missing_commits = []
@@ -151,19 +155,11 @@ def check_mirror(row, github_repository, plan_path, docs_path):
                 repo, mirror_ref, row["source_branch"]
             )
 
-    docs_digest = hashlib.sha256(docs_path.read_bytes()).hexdigest()
-    plan_digest = hashlib.sha256(
-        (
-            docs_digest
-            + json.dumps(row, sort_keys=True, separators=(",", ":"))
-        ).encode()
-    ).hexdigest()[:12]
     target_version = row.get("target_version") or row["target_el"]
     patch_id = (
         f"source_{safe_id(source_version)}"
         f"_package_{safe_id(package_name)}"
         f"_target_{safe_id(target_version)}"
-        f"_plan_{plan_digest}"
     )
     return {
         "mirror_id": row["id"],
@@ -180,7 +176,7 @@ def check_mirror(row, github_repository, plan_path, docs_path):
         "needs_sync": (
             not target_exists
             or bool(missing_commits)
-            or marker_patch_id != patch_id
+            or not marker_patch_id
         ),
     }
 
@@ -188,7 +184,6 @@ def check_mirror(row, github_repository, plan_path, docs_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan", type=Path, required=True)
-    parser.add_argument("--docs", type=Path, required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--mirror-id", default="all")
     args = parser.parse_args()
@@ -203,7 +198,7 @@ def main():
             raise SystemExit(f"Unknown RPM mirror ID: {args.mirror_id}")
 
     results = [
-        check_mirror(row, args.repository, args.plan, args.docs)
+        check_mirror(row, args.repository)
         for row in mirrors
     ]
     print(json.dumps(results, separators=(",", ":")))
