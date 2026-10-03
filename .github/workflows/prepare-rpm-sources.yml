@@ -54,17 +54,12 @@ jobs:
             const os = require("node:os");
             const path = require("node:path");
 
-            const plan = JSON.parse(
-              fs.readFileSync(process.env.PLAN_FILE, "utf8"),
-            );
-            const githubUrl = [
-              "https://github.com/",
-              process.env.GH_REPOSITORY,
-              ".git",
-            ].join("");
+            const plan = JSON.parse(fs.readFileSync(process.env.PLAN_FILE, "utf8"));
+            const repository = process.env.GH_REPOSITORY;
+            const githubUrl = `https://github.com/${repository}.git`;
             const mirrorUrl = plan.sources.mirror_url_pattern.replace(
               "{repository}",
-              process.env.GH_REPOSITORY,
+              repository,
             );
             const project = process.env.PROJECT;
             const version = process.env.OKD_VERSION;
@@ -80,31 +75,19 @@ jobs:
               } catch (error) {
                 if (allowFailure) return "";
                 const detail = error.stderr?.toString() ?? error.message;
-                throw new Error(
-                  `git ${args.join(" ")} failed: ${detail}`,
-                );
+                throw new Error(`git ${args.join(" ")} failed: ${detail}`);
               }
             }
 
-            function gitSucceeded(args, cwd) {
-              try {
-                execFileSync("git", args, {
-                  cwd,
-                  stdio: "ignore",
-                });
-                return true;
-              } catch {
-                return false;
-              }
-            }
-
-            function branchSha(url, branch) {
-              const result = execFileSync(
-                "git",
-                ["ls-remote", "--heads", url, `refs/heads/${branch}`],
-                { encoding: "utf8" },
-              ).trim();
+            function branchHead(url, branch) {
+              const result = git([
+                "ls-remote", "--heads", url, `refs/heads/${branch}`,
+              ], process.env.GITHUB_WORKSPACE);
               return result ? result.split(/\s+/)[0] : "";
+            }
+
+            function branchExists(url, branch) {
+              return Boolean(branchHead(url, branch));
             }
 
             function format(pattern, project, osVersion, version) {
@@ -114,155 +97,24 @@ jobs:
                 .replaceAll("{okd_version}", version);
             }
 
-            function rpmIdentity(spec) {
-              const macros = Object.fromEntries(
-                [...spec.matchAll(/^%(?:global|define)\s+(\w+)\s+(\S+)/gm)]
-                  .map((match) => [match[1], match[2]]),
-              );
-              function field(name) {
-                const match = spec.match(
-                  new RegExp(`^${name}:\\s*(\\S+)`, "m"),
-                );
-                if (!match) throw new Error(`Spec missing ${name}: field`);
-                let value = match[1];
-                for (let i = 0; i < 10; i++) {
-                  const expanded = value.replace(
-                    /%\{(\w+)\}/g,
-                    (macro, key) => macros[key] ?? macro,
-                  );
-                  if (expanded === value) break;
-                  value = expanded;
-                }
-                if (value.includes("%{")) {
-                  throw new Error(`Cannot resolve RPM ${name}: ${value}`);
-                }
-                return value;
-              }
-              return { name: field("Name"), version: field("Version") };
-            }
-
-            function patchId(sourceVersion, packageName, targetVersion) {
-              const safe = (value) => value.replace(/[^A-Za-z0-9_.]+/g, "_");
-              return `source_${safe(sourceVersion)}` +
-                `_package_${safe(packageName)}` +
-                `_target_${safe(targetVersion)}`;
-            }
-
-            function inspect(row, metadataFile) {
-              const temp = fs.mkdtempSync(
-                path.join(os.tmpdir(), "rpm-mirror-"),
-              );
+            function mirroredSourceSha(branch, metadataFile) {
+              const temp = fs.mkdtempSync(path.join(os.tmpdir(), "rpm-mirror-check-"));
               try {
                 git(["init", "--quiet", temp], temp);
-                git(["remote", "add", "upstream", row.source_url], temp);
+                git(["remote", "add", "mirror", mirrorUrl], temp);
                 git([
-                  "fetch", "--quiet", "--no-tags", "upstream",
-                  `refs/heads/${row.source_branch}:refs/remotes/upstream/source`,
+                  "fetch", "--quiet", "--no-tags", "mirror",
+                  `refs/heads/${branch}:refs/remotes/mirror/source`,
                 ], temp);
-                const sourceRef = "refs/remotes/upstream/source";
-                const sourceSha = git(["rev-parse", sourceRef], temp);
-                const spec = git(["show", `${sourceSha}:${row.spec}`], temp);
-                const identity = rpmIdentity(spec);
-                git(["remote", "add", "origin", githubUrl], temp);
-                const targetSha = branchSha(githubUrl, row.target_branch);
-                let missingCommits = [];
-                let markerPatchId = "";
-                let metadataMissing = false;
-                let bootstrapOnly = false;
-                let targetSpec = "";
-                if (targetSha) {
-                  const targetRef = "refs/remotes/origin/mirror";
-                  git([
-                    "fetch", "--quiet", "--no-tags", "origin",
-                    `refs/heads/${row.target_branch}:${targetRef}`,
-                  ], temp);
-                  const metadataText = git(
-                    ["show", `${targetRef}:${metadataFile}`],
-                    temp,
-                    true,
-                  );
-                  const messages = git(
-                    ["log", "--format=%B%x00", targetRef],
-                    temp,
-                  ).split("\0");
-                  const marker = messages.find((message) =>
-                    message.trimStart().startsWith(`PATCH/${row.source_branch}\n`)
-                  );
-                  markerPatchId =
-                    marker?.match(/^Patch-ID:\s*(\S+)/m)?.[1] ?? "";
-                  if (!metadataText) {
-                    metadataMissing = true;
-                    bootstrapOnly = gitSucceeded([
-                      "merge-base", "--is-ancestor", targetRef, sourceRef,
-                    ], temp);
-                    if (!bootstrapOnly && !markerPatchId) {
-                      throw new Error(
-                        `${row.target_branch} has neither ${metadataFile} ` +
-                          "nor a PATCH marker",
-                      );
-                    }
-                  } else {
-                    const metadata = JSON.parse(metadataText);
-                    const expected = [
-                      row.project,
-                      String(row.target_el),
-                      row.target_version,
-                      row.source_url,
-                      row.source_branch,
-                      row.spec,
-                    ];
-                    const actual = [
-                      metadata.project,
-                      String(metadata.target_el),
-                      metadata.target_version,
-                      metadata.source_url,
-                      metadata.source_branch,
-                      metadata.spec,
-                    ];
-                    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-                      throw new Error(
-                        `Metadata mismatch on ${row.target_branch}`,
-                      );
-                    }
-                  }
-                  missingCommits = git(["cherry", targetRef, sourceRef], temp)
-                    .split("\n")
-                    .filter((line) => line.startsWith("+ "))
-                    .map((line) => line.split(/\s+/)[1]);
-                  targetSpec = git(["show", `${targetRef}:${row.spec}`], temp);
+                const metadata = git([
+                  "show", `refs/remotes/mirror/source:${metadataFile}`,
+                ], temp, true);
+                if (!metadata) return "";
+                try {
+                  return JSON.parse(metadata).source_sha ?? "";
+                } catch {
+                  return "";
                 }
-
-                const id = patchId(
-                  identity.version,
-                  identity.name,
-                  row.target_version,
-                );
-                const releases = [
-                  ...targetSpec.matchAll(/^Release:\s*(\S+)/gm),
-                ].map((match) => match[1]);
-                const suffix = `.fallback.${id}`;
-                const releasePatched =
-                  releases.length === 1 &&
-                  (releases[0].match(/\.fallback\./g) ?? []).length === 1 &&
-                  releases[0].includes(suffix) &&
-                  (!releases[0].includes("%{?dist}") ||
-                    releases[0].indexOf(suffix) <
-                      releases[0].indexOf("%{?dist}"));
-                return {
-                  ...row,
-                  source_sha: sourceSha,
-                  target_exists: Boolean(targetSha),
-                  target_sha: targetSha,
-                  missing_commits: missingCommits,
-                  marker_patch_id: markerPatchId,
-                  patch_id: id,
-                  needs_sync:
-                    !targetSha ||
-                    missingCommits.length > 0 ||
-                    !markerPatchId ||
-                    metadataMissing ||
-                    !releasePatched,
-                };
               } finally {
                 fs.rmSync(temp, { recursive: true, force: true });
               }
@@ -294,29 +146,15 @@ jobs:
               osVersion,
               version,
             );
-            const targetVersion = shared ? `el${osVersion}` : version;
-            const targetBranch = format(
-              plan.sources.mirror_branch_patterns[
-                shared ? "shared" : "okd_release"
-              ],
-              project,
-              osVersion,
-              targetVersion,
-            );
             const sources = { [key]: {} };
-            let source = null;
             let mirror = null;
-            if (!shared && branchSha(sourceUrl, directBranch)) {
-              source = { url: sourceUrl, branch: directBranch };
+
+            if (!shared && branchExists(sourceUrl, directBranch)) {
+              sources[key][project] = { url: sourceUrl, branch: directBranch };
             } else {
               let sourceBranch;
               if (shared) {
-                sourceBranch = format(
-                  sharedPattern,
-                  project,
-                  osVersion,
-                  version,
-                );
+                sourceBranch = format(sharedPattern, project, osVersion, version);
               } else {
                 const fallbackPattern =
                   plan.sources.fallback_branch_patterns?.[project]?.[osVersion];
@@ -326,14 +164,27 @@ jobs:
                       `EL${osVersion} OKD ${version}`,
                   );
                 }
-                sourceBranch = format(
-                  fallbackPattern,
-                  project,
-                  osVersion,
-                  version,
-                );
+                sourceBranch = format(fallbackPattern, project, osVersion, version);
               }
-              mirror = inspect({
+              if (!branchExists(sourceUrl, sourceBranch)) {
+                throw new Error(`Missing source branch ${sourceBranch}`);
+              }
+
+              const targetVersion = shared ? `el${osVersion}` : version;
+              const targetBranch = format(
+                plan.sources.mirror_branch_patterns[shared ? "shared" : "okd_release"],
+                project,
+                osVersion,
+                targetVersion,
+              );
+              const targetExists = branchExists(mirrorUrl, targetBranch);
+              const sourceSha = targetExists ? branchHead(sourceUrl, sourceBranch) : "";
+              const currentSourceSha = targetExists
+                ? mirroredSourceSha(targetBranch, plan.sources.metadata_file)
+                : "";
+              const needsSync = !targetExists || sourceSha !== currentSourceSha;
+
+              mirror = {
                 id: shared
                   ? `${project}-el${osVersion}`
                   : `${project}-el${osVersion}-${version}`,
@@ -344,18 +195,13 @@ jobs:
                 source_url: sourceUrl,
                 source_branch: sourceBranch,
                 target_branch: targetBranch,
-                spec: plan.sources.spec_pattern.replace(
-                  "{project}",
-                  project,
-                ),
-              }, plan.sources.metadata_file);
-              source = { url: mirrorUrl, branch: targetBranch };
+                spec: plan.sources.spec_pattern.replace("{project}", project),
+              };
+              sources[key][project] = { url: mirrorUrl, branch: targetBranch };
+              core.setOutput("mirrors", JSON.stringify(needsSync ? [mirror] : []));
             }
-            sources[key][project] = source;
-            core.setOutput(
-              "mirrors",
-              JSON.stringify(mirror?.needs_sync ? [mirror] : []),
-            );
+
+            if (!mirror) core.setOutput("mirrors", "[]");
             core.setOutput("sources", JSON.stringify(sources));
 
   sync:

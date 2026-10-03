@@ -17,11 +17,94 @@ concurrency:
   queue: max
 
 jobs:
-  sync:
+  prepare:
+    if: inputs.mirrors != '[]'
+    runs-on: ubuntu-latest
+    outputs:
+      plan: ${{ steps.branches.outputs.plan }}
+      target_branch: ${{ steps.branches.outputs.target_branch }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create missing mirror branches
+        id: branches
+        uses: actions/github-script@v9
+        env:
+          MIRRORS: ${{ inputs.mirrors }}
+        with:
+          script: |
+            const { execFileSync } = require("node:child_process");
+            const mirrors = JSON.parse(process.env.MIRRORS);
+            const repository = process.env.GITHUB_REPOSITORY;
+            const [owner, repo] = repository.split("/");
+            const workspace = process.env.GITHUB_WORKSPACE;
+            const mirrorUrl = `https://github.com/${repository}.git`;
+            const prepared = [];
+            if (mirrors.length !== 1) {
+              throw new Error("Mirror preparation expects exactly one package target.");
+            }
+
+            function git(args) {
+              try {
+                return execFileSync("git", args, {
+                  cwd: workspace,
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                }).trimEnd();
+              } catch (error) {
+                const detail = error.stderr?.toString() ?? error.message;
+                throw new Error(`git ${args.join(" ")} failed: ${detail}`);
+              }
+            }
+
+            for (const mirror of mirrors) {
+              const sourceRemote = `rpm-setup-${mirror.id}`;
+              const sourceRef = `refs/remotes/${sourceRemote}/source`;
+              git(["remote", "add", sourceRemote, mirror.source_url]);
+              git([
+                "fetch", "--quiet", "--no-tags", sourceRemote,
+                `refs/heads/${mirror.source_branch}:${sourceRef}`,
+              ]);
+              const sourceSha = git(["rev-parse", sourceRef]);
+              const targetRef = `refs/heads/${mirror.target_branch}`;
+              const targetOutput = git([
+                "ls-remote", "--heads", mirrorUrl, targetRef,
+              ]);
+              let baseSha = "";
+              if (targetOutput) {
+                baseSha = targetOutput.split(/\s+/)[0];
+              } else {
+                try {
+                  await github.rest.git.createRef({
+                    owner,
+                    repo,
+                    ref: targetRef,
+                    sha: sourceSha,
+                  });
+                  baseSha = sourceSha;
+                } catch (error) {
+                  const current = git(["ls-remote", "--heads", mirrorUrl, targetRef]);
+                  if (!current) throw error;
+                  baseSha = current.split(/\s+/)[0];
+                }
+              }
+              prepared.push({ ...mirror, source_sha: sourceSha, base_sha: baseSha });
+            }
+            core.setOutput("plan", JSON.stringify(prepared));
+            core.setOutput("target_branch", prepared[0].target_branch);
+
+  agent:
+    needs: prepare
     if: inputs.mirrors != '[]'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       copilot-requests: write
     steps:
       - name: Checkout repository
@@ -30,222 +113,101 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prepare mirror worktrees and metadata
+      - name: Set up mirror remotes for the agent
+        id: remotes
         uses: actions/github-script@v9
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          MIRRORS: ${{ inputs.mirrors }}
+          MIRROR_PLAN: ${{ needs.prepare.outputs.plan }}
         with:
           script: |
             const { execFileSync } = require("node:child_process");
             const fs = require("node:fs");
             const path = require("node:path");
+            const mirrors = JSON.parse(process.env.MIRROR_PLAN);
+            if (mirrors.length !== 1) {
+              throw new Error("Mirror sync expects exactly one package target.");
+            }
+            const repository = process.env.GITHUB_REPOSITORY;
+            const workspace = process.env.GITHUB_WORKSPACE;
+            const mirrorUrl = `https://github.com/${repository}.git`;
+            const prepared = [];
 
-            function git(args, cwd, extraEnv = {}) {
+            function git(args) {
               try {
                 return execFileSync("git", args, {
-                  cwd,
+                  cwd: workspace,
                   encoding: "utf8",
                   stdio: ["ignore", "pipe", "pipe"],
-                  env: { ...process.env, ...extraEnv },
                 }).trimEnd();
               } catch (error) {
-                throw new Error(
-                  `git ${args.join(" ")} failed: ${error.stderr?.toString() ?? error.message}`,
-                );
+                const detail = error.stderr?.toString() ?? error.message;
+                throw new Error(`git ${args.join(" ")} failed: ${detail}`);
               }
             }
 
-            const mirrors = JSON.parse(process.env.MIRRORS);
-            const prepared = [];
             for (const mirror of mirrors) {
-              const currentTargetOutput = git([
-                "ls-remote", "--heads", "https://github.com/" +
-                  process.env.GITHUB_REPOSITORY + ".git",
-                `refs/heads/${mirror.target_branch}`,
-              ], process.env.GITHUB_WORKSPACE);
-              const currentTarget = currentTargetOutput
-                ? currentTargetOutput.split(/\s+/)[0]
-                : "";
+              const sourceRemote = `rpm-upstream-${mirror.id}`;
+              const mirrorRemote = `rpm-mirror-${mirror.id}`;
+              const sourceRef = `refs/remotes/${sourceRemote}/source`;
+              const targetRef = `refs/remotes/${mirrorRemote}/target`;
+              git(["remote", "add", sourceRemote, mirror.source_url]);
+              git([
+                "fetch", "--quiet", "--no-tags", sourceRemote,
+                `refs/heads/${mirror.source_branch}:${sourceRef}`,
+              ]);
+              git(["remote", "add", mirrorRemote, mirrorUrl]);
+              git([
+                "fetch", "--quiet", "--no-tags", mirrorRemote,
+                `refs/heads/${mirror.target_branch}:${targetRef}`,
+              ]);
+              const baseSha = git(["rev-parse", targetRef]);
+              const mirrorPlan = mirrors.find((item) => item.id === mirror.id);
               if (
-                mirror.target_exists
-                  ? currentTarget !== mirror.target_sha
-                  : Boolean(currentTarget)
+                baseSha !== mirrorPlan.base_sha ||
+                git(["rev-parse", sourceRef]) !== mirrorPlan.source_sha
               ) {
                 throw new Error(
-                  `Mirror ${mirror.target_branch} changed after planning; retry.`,
+                  `RPM source branches changed during setup for ${mirror.target_branch}.`,
                 );
               }
-
-              const repoPath = process.env.GITHUB_WORKSPACE;
-              const upstreamRemote = `rpm-upstream-${mirror.id}`;
-              const sourceRef = `refs/remotes/${upstreamRemote}/source`;
-              git(["remote", "add", upstreamRemote, mirror.source_url], repoPath);
-              git([
-                "fetch", "--quiet", "--no-tags", upstreamRemote,
-                `refs/heads/${mirror.source_branch}:${sourceRef}`,
-              ], repoPath);
-              if (git(["rev-parse", sourceRef], repoPath) !== mirror.source_sha) {
-                throw new Error(
-                  `Upstream ${mirror.source_branch} changed during setup; retry.`,
-                );
-              }
-
-              let baseSha = currentTarget;
-              if (!baseSha) {
-                const token = process.env.GITHUB_TOKEN;
-                const authHeader = `AUTHORIZATION: basic ${Buffer.from(
-                  `x-access-token:${token}`,
-                ).toString("base64")}`;
-                git([
-                  "push", "--quiet",
-                  `https://github.com/${process.env.GITHUB_REPOSITORY}.git`,
-                  `${sourceRef}:refs/heads/${mirror.target_branch}`,
-                ], repoPath, {
-                  GIT_CONFIG_COUNT: "1",
-                  GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
-                  GIT_CONFIG_VALUE_0: authHeader,
-                });
-                baseSha = mirror.source_sha;
-              }
-
-              const remoteRef = `refs/remotes/rpm-mirror/${mirror.id}`;
-              git([
-                "fetch", "--quiet", "--no-tags",
-                `https://github.com/${process.env.GITHUB_REPOSITORY}.git`,
-                `refs/heads/${mirror.target_branch}:${remoteRef}`,
-              ], repoPath);
-              const fetchedSha = git(
-                ["rev-parse", remoteRef],
-                repoPath,
-              );
-              if (fetchedSha !== baseSha) {
-                throw new Error(`Mirror ${mirror.target_branch} changed during setup.`);
-              }
-
               const worktree = path.join(
                 process.env.RUNNER_TEMP,
                 "rpm-mirrors",
                 mirror.id,
               );
               fs.mkdirSync(path.dirname(worktree), { recursive: true });
-              git(["worktree", "add", "--detach", worktree, fetchedSha], repoPath);
-              git(["config", "user.name", "Copilot RPM Mirror"], worktree);
-              git([
-                "config", "user.email",
-                "copilot-rpm-mirror@users.noreply.github.com",
-              ], worktree);
-              git(["config", "commit.gpgsign", "false"], worktree);
-
-              const markerExists = Boolean(mirror.marker_patch_id);
-              if (!markerExists) {
-                git([
-                  "commit", "--allow-empty",
-                  "-m", `PATCH/${mirror.source_branch}`,
-                  "-m", `Patch-ID: ${mirror.patch_id}`,
-                ], worktree);
-              }
-
-              let pendingCommits = [];
-              for (let index = 0; index < mirror.missing_commits.length; index++) {
-                const commit = mirror.missing_commits[index];
-                try {
-                  git(["cherry-pick", commit], worktree);
-                } catch (error) {
-                  let cherryPick = false;
-                  try {
-                    git(
-                      ["rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD"],
-                      worktree,
-                    );
-                    cherryPick = true;
-                  } catch {
-                    cherryPick = false;
-                  }
-                  if (!cherryPick) throw error;
-                  core.info(
-                    `Cherry-pick ${commit} needs Copilot conflict resolution.`,
-                  );
-                  pendingCommits = mirror.missing_commits.slice(index + 1);
-                  break;
-                }
-              }
-
-              const metadata = {
-                project: mirror.project,
-                target_el: mirror.target_el,
-                target_version: mirror.target_version,
-                source_url: mirror.source_url,
-                source_branch: mirror.source_branch,
-                spec: mirror.spec,
-                source_sha: mirror.source_sha,
-                patch_id: mirror.patch_id,
-              };
-              fs.writeFileSync(
-                path.join(worktree, ".rpm-mirror.json"),
-                `${JSON.stringify(metadata, null, 2)}\n`,
-              );
+              git(["worktree", "add", "--detach", worktree, baseSha]);
               const contextPath = path.join(
                 process.env.RUNNER_TEMP,
                 `${mirror.id}.json`,
               );
-              const sourceSpec = git(
-                ["show", `${sourceRef}:${mirror.spec}`],
-                worktree,
-              );
-              const upstreamSpecDiff = git([
-                "diff", "--no-ext-diff",
-                baseSha, sourceRef, "--", mirror.spec,
-              ], worktree);
-              const currentSpec = fs.readFileSync(
-                path.join(worktree, mirror.spec),
-                "utf8",
-              );
-              const conflictedFiles = git([
-                "diff", "--name-only", "--diff-filter=U",
-              ], worktree).split("\n").filter(Boolean);
-              const conflictDiff = git([
-                "diff", "--no-ext-diff", "--cc",
-              ], worktree);
-              const conflictedContents = Object.fromEntries(
-                conflictedFiles.map((file) => [
-                  file,
-                  fs.readFileSync(path.join(worktree, file), "utf8"),
-                ]),
-              );
-              fs.writeFileSync(contextPath, `${JSON.stringify({
+              const context = {
                 ...mirror,
-                source_spec: sourceSpec,
-                upstream_spec_diff: upstreamSpecDiff,
-                current_spec: currentSpec,
-                conflicted_files: conflictedFiles,
-                conflicted_contents: conflictedContents,
-                conflict_diff: conflictDiff,
-              }, null, 2)}\n`);
-              prepared.push({
-                ...mirror,
-                pending_commits: pendingCommits,
-                metadata,
-                source_spec: sourceSpec,
-                upstream_spec_diff: upstreamSpecDiff,
-                worktree,
+                mirror_url: mirrorUrl,
+                source_remote: sourceRemote,
                 source_ref: sourceRef,
+                mirror_remote: mirrorRemote,
+                target_ref: targetRef,
+                base_sha: mirrorPlan.base_sha,
+                source_sha: mirrorPlan.source_sha,
+                worktree,
                 context_path: contextPath,
-                base_sha: baseSha,
-                marker_exists: markerExists,
-              });
+              };
+              fs.writeFileSync(
+                contextPath,
+                `${JSON.stringify(context, null, 2)}\n`,
+              );
+              prepared.push(context);
             }
-
             fs.writeFileSync(
               path.join(process.env.RUNNER_TEMP, "rpm-mirrors.json"),
               `${JSON.stringify(prepared)}\n`,
             );
-            core.setOutput("prepared", String(prepared.length > 0));
 
       - name: Install Copilot CLI
         run: npm install --global @github/copilot@1.0.91
 
-      - name: Recreate mirror patches with Copilot
+      - name: Maintain RPM mirrors with Copilot
         uses: actions/github-script@v9
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -253,20 +215,6 @@ jobs:
           script: |
             const { execFileSync } = require("node:child_process");
             const fs = require("node:fs");
-            function git(args, cwd, extraEnv = {}) {
-              try {
-                return execFileSync("git", args, {
-                  cwd,
-                  encoding: "utf8",
-                  stdio: ["ignore", "pipe", "pipe"],
-                  env: { ...process.env, ...extraEnv },
-                }).trimEnd();
-              } catch (error) {
-                throw new Error(
-                  `git ${args.join(" ")} failed: ${error.stderr?.toString() ?? error.message}`,
-                );
-              }
-            }
             const mirrors = JSON.parse(
               fs.readFileSync(
                 `${process.env.RUNNER_TEMP}/rpm-mirrors.json`,
@@ -275,338 +223,296 @@ jobs:
             );
             const instruction = `${process.env.GITHUB_WORKSPACE}/.github/prompts/rpm-mirror-maintenance.md`;
             for (const mirror of mirrors) {
-              function currentConflict() {
-                try {
-                  git(
-                    ["rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD"],
-                    mirror.worktree,
-                  );
-                  return true;
-                } catch {
-                  return false;
-                }
-              }
-              function updateContext() {
-                const currentSpec = fs.readFileSync(
-                  `${mirror.worktree}/${mirror.spec}`,
-                  "utf8",
-                );
-                const context = {
-                  ...mirror,
-                  current_spec: currentSpec,
-                  conflicted_files: git([
-                    "diff", "--name-only", "--diff-filter=U",
-                  ], mirror.worktree).split("\n").filter(Boolean),
-                  conflicted_contents: Object.fromEntries(
-                    git([
-                      "diff", "--name-only", "--diff-filter=U",
-                    ], mirror.worktree)
-                      .split("\n")
-                      .filter(Boolean)
-                      .map((file) => [
-                        file,
-                        fs.readFileSync(
-                          `${mirror.worktree}/${file}`,
-                          "utf8",
-                        ),
-                      ]),
-                  ),
-                  conflict_diff: git([
-                    "diff", "--no-ext-diff", "--cc",
-                  ], mirror.worktree),
-                };
-                fs.writeFileSync(
-                  mirror.context_path,
-                  `${JSON.stringify(context, null, 2)}\n`,
-                );
-              }
-              function askCopilot(prompt) {
-                updateContext();
-                execFileSync("copilot", [
-                  "-C", mirror.worktree,
-                  "-p",
-                  prompt,
-                  "--attachment", instruction,
-                  "--attachment", mirror.context_path,
-                  "--model", "gpt-6-luna",
-                  "--reasoning-effort", "max",
-                  "--context", "long_context",
-                  "--allow-tool=write",
-                  "--deny-tool=shell",
-                  "-s",
-                ], {
-                  cwd: mirror.worktree,
-                  stdio: "inherit",
-                  env: process.env,
-                });
-              }
-              function resolveConflict() {
-                if (!currentConflict()) return;
-                askCopilot(
-                  "Resolve the active upstream cherry-pick conflict using " +
-                    "the attached instruction and context. Edit only the " +
-                    "conflicted files " +
-                    "needed for this mirror; do not run shell commands or " +
-                    "stage or continue the cherry-pick.",
-                );
-                const conflictedFiles = git([
-                  "diff", "--name-only", "--diff-filter=U",
-                ], mirror.worktree).split("\n").filter(Boolean);
-                const markersRemaining = conflictedFiles.filter((file) =>
-                  fs.existsSync(`${mirror.worktree}/${file}`) &&
-                    /^(<<<<<<< |=======$|>>>>>>> )/m.test(
-                      fs.readFileSync(
-                        `${mirror.worktree}/${file}`,
-                        "utf8",
-                      ),
-                    )
-                );
-                git(["add", "--", ...conflictedFiles], mirror.worktree);
-                const unresolved = git([
-                  "diff", "--name-only", "--diff-filter=U",
-                ], mirror.worktree);
-                if (unresolved || markersRemaining.length) {
-                  throw new Error(
-                    `Copilot left unresolved conflicts in ${mirror.target_branch}`,
-                  );
-                }
-                git(
-                  ["cherry-pick", "--continue"],
-                  mirror.worktree,
-                  { GIT_EDITOR: "true" },
-                );
-              }
-
-              resolveConflict();
-              for (const commit of mirror.pending_commits) {
-                try {
-                  git(["cherry-pick", commit], mirror.worktree);
-                } catch (error) {
-                  if (!currentConflict()) throw error;
-                  resolveConflict();
-                }
-              }
-              askCopilot(
-                "Read the attached repository instruction and mirror context, " +
-                  "then update only this mirror's package spec.",
-              );
-
-              const spec = fs.readFileSync(
-                `${mirror.worktree}/${mirror.spec}`,
-                "utf8",
-              );
-              let expectedSpec = mirror.source_spec;
-              if (
-                mirror.project === "cri-o" &&
-                String(mirror.target_el) === "9"
-              ) {
-                if (
-                  !/^Suggests:\s+containernetworking-plugins\b/m.test(
-                    expectedSpec,
-                  )
-                ) {
-                  const recommendation = expectedSpec.match(
-                    /^Recommends:.*$/m,
-                  );
-                  if (!recommendation) {
-                    throw new Error("CRI-O source spec has no Recommends line");
-                  }
-                  expectedSpec = expectedSpec.replace(
-                    recommendation[0],
-                    `${recommendation[0]}\nSuggests:       containernetworking-plugins >= 1.0.0-1`,
-                  );
-                }
-                if (
-                  !/^\s*--cni-plugin-dir "%\{_libexecdir\}\/cni" \\$/m.test(
-                    expectedSpec,
-                  )
-                ) {
-                  const pluginDir = expectedSpec.match(
-                    /^([ \t]*)--cni-plugin-dir \/opt\/cni\/bin[ \t]*\\$/m,
-                  );
-                  if (!pluginDir) {
-                    throw new Error(
-                      "CRI-O source spec has no /opt/cni/bin setting",
-                    );
-                  }
-                  expectedSpec = expectedSpec.replace(
-                    pluginDir[0],
-                    `${pluginDir[0]}\n${pluginDir[1]}--cni-plugin-dir "%{_libexecdir}/cni" \\`,
-                  );
-                }
-              }
-              const sourceReleases = [
-                ...expectedSpec.matchAll(/^Release:\s*(\S+)/gm),
-              ];
-              if (sourceReleases.length !== 1) {
-                throw new Error(
-                  `Expected one Release field in ${mirror.spec}`,
-                );
-              }
-              const baseRelease = sourceReleases[0][1].replace(
-                /\.fallback\.[^%\s]+/g,
-                "",
-              );
-              const expectedSuffix = `.fallback.${mirror.patch_id}`;
-              const release = baseRelease.includes("%{?dist}")
-                ? baseRelease.replace(
-                    "%{?dist}",
-                    `${expectedSuffix}%{?dist}`,
-                  )
-                : `${baseRelease}${expectedSuffix}`;
-              expectedSpec = expectedSpec.replace(
-                /^(Release:\s*)\S+/m,
-                (_match, prefix) => `${prefix}${release}`,
-              );
-              if (spec !== expectedSpec) {
-                throw new Error(
-                  `Copilot produced changes outside the allowed RPM spec patch for ${mirror.spec}`,
-                );
-              }
-              const metadata = JSON.parse(fs.readFileSync(
-                `${mirror.worktree}/.rpm-mirror.json`,
-                "utf8",
-              ));
-              if (JSON.stringify(metadata) !== JSON.stringify(mirror.metadata)) {
-                throw new Error(
-                  `Copilot modified mirror metadata on ${mirror.target_branch}`,
-                );
-              }
-              const releases = [
-                ...spec.matchAll(/^Release:\s*(\S+)/gm),
-              ].map((match) => match[1]);
-              const suffix = `.fallback.${mirror.patch_id}`;
-              if (
-                releases.length !== 1 ||
-                (releases[0].match(/\.fallback\./g) ?? []).length !== 1 ||
-                !releases[0].includes(suffix) ||
-                (releases[0].includes("%{?dist}") &&
-                  releases[0].indexOf(suffix) >
-                    releases[0].indexOf("%{?dist}"))
-              ) {
-                throw new Error(
-                  `${mirror.spec} is missing deterministic Release suffix ${suffix}`,
-                );
-              }
-
-              const unresolved = execFileSync(
-                "git",
-                ["diff", "--name-only", "--diff-filter=U"],
-                { cwd: mirror.worktree, encoding: "utf8" },
-              ).trim();
-              let cherryPick = false;
-              try {
-                execFileSync(
-                  "git",
-                  ["rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD"],
-                  {
-                    cwd: mirror.worktree,
-                    encoding: "utf8",
-                    stdio: ["ignore", "pipe", "ignore"],
-                  },
-                );
-                cherryPick = true;
-              } catch {
-                cherryPick = false;
-              }
-              if (unresolved || cherryPick) {
-                throw new Error(`Unresolved cherry-pick in ${mirror.target_branch}`);
-              }
-              const changedFiles = execFileSync(
-                "git",
-                ["diff", "--name-only", "-z", mirror.source_ref, "HEAD"],
-                { cwd: mirror.worktree, encoding: "utf8" },
-              ).split("\0").filter(Boolean);
-              const stagedFiles = execFileSync(
-                "git",
-                ["diff", "--cached", "--name-only", "-z"],
-                { cwd: mirror.worktree, encoding: "utf8" },
-              ).split("\0").filter(Boolean);
-              const unstagedFiles = execFileSync(
-                "git",
-                ["diff", "--name-only", "-z"],
-                { cwd: mirror.worktree, encoding: "utf8" },
-              ).split("\0").filter(Boolean);
-              const untrackedFiles = execFileSync(
-                "git",
-                ["ls-files", "--others", "--exclude-standard", "-z"],
-                { cwd: mirror.worktree, encoding: "utf8" },
-              ).split("\0").filter(Boolean);
-              const allowedFiles = new Set([
-                mirror.spec,
-                ".rpm-mirror.json",
-              ]);
-              const unexpectedFiles = [
-                ...new Set([
-                  ...changedFiles,
-                  ...stagedFiles,
-                  ...unstagedFiles,
-                  ...untrackedFiles,
-                ]),
-              ].filter((file) => !allowedFiles.has(file));
-              if (unexpectedFiles.length) {
-                throw new Error(
-                  `Unexpected mirror changes: ${unexpectedFiles.join(", ")}`,
-                );
-              }
-              const missing = execFileSync(
-                "git",
-                ["cherry", "HEAD", mirror.source_ref],
-                { cwd: mirror.worktree, encoding: "utf8" },
-              ).split("\n").filter((line) => line.startsWith("+ "));
-              if (missing.length) {
-                throw new Error(
-                  `${mirror.target_branch} still lacks upstream commits`,
-                );
-              }
-              execFileSync(
-                "git",
-                ["add", "-A", "--", mirror.spec, ".rpm-mirror.json"],
-                { cwd: mirror.worktree },
-              );
-              try {
-                execFileSync(
-                  "git",
-                  ["diff", "--cached", "--quiet"],
-                  { cwd: mirror.worktree, stdio: "ignore" },
-                );
-              } catch {
-                execFileSync(
-                  "git",
-                  ["commit", "-m", `Update ${mirror.project} RPM mirror`],
-                  { cwd: mirror.worktree, stdio: "inherit" },
-                );
-              }
+              execFileSync("copilot", [
+                "-C", mirror.worktree,
+                "-p",
+                "Maintain this RPM mirror using the attached instructions " +
+                  "and context. Inspect the configured upstream and mirror " +
+                  "remotes, update only the package spec and mirror metadata, " +
+                  "and leave all changes uncommitted for the workflow action.",
+                "--attachment", instruction,
+                "--attachment", mirror.context_path,
+                "--model", "gpt-6-luna",
+                "--reasoning-effort", "max",
+                "--context", "long_context",
+                "--allow-tool=write",
+                "--allow-tool=shell",
+                "-s",
+              ], {
+                cwd: mirror.worktree,
+                stdio: "inherit",
+                env: process.env,
+              });
             }
 
-      - name: Push signed mirror commits
+      - name: Validate and upload agent changes
         uses: actions/github-script@v9
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          MIRROR_PLAN: ${{ needs.prepare.outputs.plan }}
         with:
           script: |
             const { execFileSync } = require("node:child_process");
             const fs = require("node:fs");
-            const mirrors = JSON.parse(
-              fs.readFileSync(
-                `${process.env.RUNNER_TEMP}/rpm-mirrors.json`,
-                "utf8",
-              ),
+            const path = require("node:path");
+            const mirrors = JSON.parse(process.env.MIRROR_PLAN);
+            if (mirrors.length !== 1) {
+              throw new Error("Mirror validation expects exactly one package target.");
+            }
+            const mirror = mirrors[0];
+            const worktree = path.join(
+              process.env.RUNNER_TEMP,
+              "rpm-mirrors",
+              mirror.id,
             );
-            for (const mirror of mirrors) {
-              execFileSync(
-                "npx",
-                [
-                  "--yes",
-                  "push-signed-commits@1.2.1",
-                  process.env.GITHUB_REPOSITORY,
-                  mirror.target_branch,
-                  `${mirror.base_sha}..HEAD`,
-                ],
-                {
-                  cwd: mirror.worktree,
-                  stdio: "inherit",
-                  env: process.env,
-                },
+
+            function git(args) {
+              try {
+                return execFileSync("git", args, {
+                  cwd: worktree,
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                }).trimEnd();
+              } catch (error) {
+                const detail = error.stderr?.toString() ?? error.message;
+                throw new Error(`git ${args.join(" ")} failed: ${detail}`);
+              }
+            }
+
+            if (git(["rev-parse", "HEAD"]) !== mirror.base_sha) {
+              throw new Error(
+                `The agent committed changes for ${mirror.target_branch}; ` +
+                  "mirror commits must be created by a workflow action.",
               );
             }
+            if (git(["diff", "--name-only", "--diff-filter=U"])) {
+              throw new Error(`Unresolved conflicts in ${mirror.target_branch}`);
+            }
+
+            const metadataPath = path.join(worktree, ".rpm-mirror.json");
+            const specPath = path.join(worktree, mirror.spec);
+            const expectedWorktree = path.join(
+              process.env.RUNNER_TEMP,
+              "rpm-mirrors",
+              mirror.id,
+            );
+            if (fs.realpathSync(worktree) !== expectedWorktree) {
+              throw new Error(`Invalid mirror worktree path for ${mirror.target_branch}`);
+            }
+            for (const file of [metadataPath, specPath]) {
+              if (!fs.lstatSync(file).isFile()) {
+                throw new Error(`Expected a regular mirror file: ${file}`);
+              }
+            }
+            const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+            const expected = {
+              project: mirror.project,
+              target_el: String(mirror.target_el),
+              target_version: mirror.target_version,
+              source_url: mirror.source_url,
+              source_branch: mirror.source_branch,
+              spec: mirror.spec,
+              source_sha: mirror.source_sha,
+            };
+            if (
+              JSON.stringify(Object.keys(metadata).sort()) !==
+                JSON.stringify(Object.keys(expected).sort()) ||
+              Object.entries(expected).some(([key, value]) => metadata[key] !== value)
+            ) {
+              throw new Error(`Invalid mirror metadata for ${mirror.target_branch}`);
+            }
+
+            const changed = new Set();
+            for (const args of [
+              ["diff", "--name-only", "-z", "HEAD"],
+              ["diff", "--cached", "--name-only", "-z"],
+              ["ls-files", "--others", "--exclude-standard", "-z"],
+            ]) {
+              for (const file of git(args).split("\0")) {
+                if (file) changed.add(file);
+              }
+            }
+            const allowed = new Set([mirror.spec, ".rpm-mirror.json"]);
+            const unexpected = [...changed].filter((file) => !allowed.has(file));
+            if (unexpected.length) {
+              throw new Error(
+                `Unexpected mirror changes: ${unexpected.join(", ")}`,
+              );
+            }
+            if (!changed.size) {
+              throw new Error(`No mirror changes for ${mirror.target_branch}`);
+            }
+
+            const artifactRoot = path.join(
+              process.env.RUNNER_TEMP,
+              "rpm-mirror-changes",
+            );
+            fs.rmSync(artifactRoot, { recursive: true, force: true });
+            fs.mkdirSync(artifactRoot, { recursive: true });
+            fs.mkdirSync(path.dirname(path.join(artifactRoot, mirror.spec)), {
+              recursive: true,
+            });
+            fs.copyFileSync(specPath, path.join(artifactRoot, mirror.spec));
+            fs.copyFileSync(metadataPath, path.join(artifactRoot, ".rpm-mirror.json"));
+            fs.writeFileSync(
+              path.join(artifactRoot, "manifest.json"),
+              `${JSON.stringify({
+                ...mirror,
+              }, null, 2)}\n`,
+            );
+
+      - name: Upload agent changes
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-mirror-changes
+          path: ${{ runner.temp }}/rpm-mirror-changes/
+          if-no-files-found: error
+          retention-days: 1
+
+  commit:
+    needs:
+      - prepare
+      - agent
+    if: inputs.mirrors != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout mirror branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.target_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download agent changes
+        uses: actions/download-artifact@v4.1.3
+        with:
+          name: rpm-mirror-changes
+          path: ${{ runner.temp }}/rpm-mirror-changes
+
+      - name: Publish signed mirror update
+        uses: actions/github-script@v9
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: ${{ needs.prepare.outputs.target_branch }}
+          MIRROR_PLAN: ${{ needs.prepare.outputs.plan }}
+        with:
+          script: |
+            const { execFileSync } = require("node:child_process");
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const root = process.env.GITHUB_WORKSPACE;
+            const artifactRoot = path.join(
+              process.env.RUNNER_TEMP,
+              "rpm-mirror-changes",
+            );
+            const manifest = JSON.parse(fs.readFileSync(
+              path.join(artifactRoot, "manifest.json"),
+              "utf8",
+            ));
+            const mirrors = JSON.parse(process.env.MIRROR_PLAN);
+            if (mirrors.length !== 1) {
+              throw new Error("Mirror publishing expects exactly one package target.");
+            }
+            const mirror = mirrors[0];
+
+            function git(args) {
+              try {
+                return execFileSync("git", args, {
+                  cwd: root,
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                }).trimEnd();
+              } catch (error) {
+                const detail = error.stderr?.toString() ?? error.message;
+                throw new Error(`git ${args.join(" ")} failed: ${detail}`);
+              }
+            }
+
+            if (
+              process.env.TARGET_BRANCH !== mirror.target_branch ||
+              manifest.target_branch !== mirror.target_branch ||
+              JSON.stringify(manifest) !== JSON.stringify(mirror)
+            ) {
+              throw new Error("Agent artifact targets an unexpected mirror branch.");
+            }
+            if (git(["rev-parse", "HEAD"]) !== manifest.base_sha) {
+              throw new Error(
+                `Mirror ${manifest.target_branch} changed while the agent ran; retry.`,
+              );
+            }
+            const files = new Set();
+            function list(directory, prefix = "") {
+              for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                const relative = path.posix.join(prefix, entry.name);
+                const fullPath = path.join(directory, entry.name);
+                if (entry.isDirectory()) list(fullPath, relative);
+                else if (entry.isFile()) files.add(relative);
+                else throw new Error(`Invalid artifact entry: ${relative}`);
+              }
+            }
+            list(artifactRoot);
+            const expectedFiles = new Set(["manifest.json", manifest.spec, ".rpm-mirror.json"]);
+            if (
+              files.size !== expectedFiles.size ||
+              [...files].some((file) => !expectedFiles.has(file))
+            ) {
+              throw new Error("Agent artifact contains unexpected files.");
+            }
+
+            const metadata = JSON.parse(fs.readFileSync(
+              path.join(artifactRoot, ".rpm-mirror.json"),
+              "utf8",
+            ));
+            const expected = {
+              project: mirror.project,
+              target_el: String(mirror.target_el),
+              target_version: mirror.target_version,
+              source_url: mirror.source_url,
+              source_branch: mirror.source_branch,
+              spec: mirror.spec,
+              source_sha: mirror.source_sha,
+            };
+            if (
+              JSON.stringify(Object.keys(metadata).sort()) !==
+                JSON.stringify(Object.keys(expected).sort()) ||
+              Object.entries(expected).some(([key, value]) => metadata[key] !== value)
+            ) {
+              throw new Error("Agent artifact has invalid mirror metadata.");
+            }
+
+            const specDestination = path.join(root, manifest.spec);
+            fs.mkdirSync(path.dirname(specDestination), { recursive: true });
+            fs.copyFileSync(path.join(artifactRoot, manifest.spec), specDestination);
+            fs.copyFileSync(
+              path.join(artifactRoot, ".rpm-mirror.json"),
+              path.join(root, ".rpm-mirror.json"),
+            );
+            git(["add", "--", manifest.spec, ".rpm-mirror.json"]);
+            try {
+              execFileSync("git", ["diff", "--cached", "--quiet"], {
+                cwd: root,
+                stdio: "ignore",
+              });
+              throw new Error("Agent changes are empty; refusing to publish.");
+            } catch (error) {
+              if (error.message.startsWith("Agent changes are empty")) throw error;
+              if (error.status !== 1) throw error;
+            }
+            execFileSync(
+              "npx",
+              [
+                "--yes",
+                "push-signed-commits@1.2.1",
+                "-m",
+                `Update ${manifest.project} RPM mirror`,
+                process.env.GITHUB_REPOSITORY,
+                manifest.target_branch,
+              ],
+              {
+                cwd: root,
+                stdio: "inherit",
+                env: process.env,
+              },
+            );

@@ -15,71 +15,42 @@ provide the exact source branch needed by a build. Use the source patterns in
 `rpms/mirror-plan.json`; do not add version/EL-specific source-map entries.
 Use `rpms/<project>-<el>-<okd-version>` when the source is
 OKD-release-specific and `rpms/<project>-<el>` when it is shared across OKD
-releases. Keep the full upstream history as the base; do not squash or
-force-push updates.
-
-The first commit after the upstream base is an empty commit whose subject
-identifies the source branch:
-
-```text
-PATCH/<upstream-branch-name>
-```
-
-Its body contains the deterministic patch ID
-`source_<source-version>_package_<rpm-name>_target_<target-version>`. Replace
-characters outside letters, digits, periods, and underscores with underscores.
-For example, the CRI-O 4.22/EL9 mirror uses
-`source_1.35.5_package_cri_o_target_4.22`.
-Each mirrored spec carries `.fallback.<patch-id>` in its `Release:` value,
-before `%{?dist}`. The mirror workflow updates this deterministic release patch
-for every mirrored package, even when no additional functional EL
-compatibility change is needed; the RPM build only consumes the prepared spec.
+releases. Never force-push a mirror branch.
 
 `scan-okd-releases.yml` plans the release matrix first, then passes only the
 selected OKD/EL and package combinations in the caller's matrix of reusable
-`prepare-rpm-sources.yml` calls. Each call validates the target and project,
-selects an exact upstream branch or a mirror branch, and emits that source map.
-For mirrored sources, it fetches the selected upstream ref and mirror ref,
-validates mirror metadata or the supported bootstrap state, checks
-patch-equivalent commits and the deterministic `Release:` suffix, and requests
-synchronization if anything is stale. The sync workflow consumes that work
-item: it confirms the fetched upstream SHA and mirror branch state still match
-the plan, seeds a missing mirror branch, applies missing upstream commits,
-updates metadata and the documented package patch, and validates the final
-files before signing. The extra upstream `ls-remote` and post-staging allowlist
-checks were redundant with the exact-SHA fetch and earlier working-tree
-allowlist respectively; the target-state rechecks remain to guard against
-concurrent branch changes. Successful sync is the contract that the selected
-mirror source exists, so no post-sync resolver is needed. The callers collect
-the per-call artifacts into a source map. The scan composes release build
-configurations with these sources; its build matrix calls the reusable image
+`prepare-rpm-sources.yml` calls. Each call selects the exact upstream branch
+when it exists, otherwise the configured fallback/shared branch and a local
+mirror branch. It checks mirror branch existence; for an existing mirror, it
+compares the upstream head SHA with the `source_sha` recorded in the branch's
+`.rpm-mirror.json` to decide whether an update is needed. This SHA comparison
+is solely the mirror freshness check; branch selection is based on branch
+availability. No RPM `Release:` value is checked or assumed deterministic.
+
+When a mirror needs setup or an update, `sync-rpm-mirror.yml` fetches the
+upstream and mirror refs and provides them as remotes in a worktree. Copilot
+compares the refs and maintains only the package spec and `.rpm-mirror.json`.
+For CRI-O EL9, it preserves the `containernetworking-plugins` suggestion and
+`%{_libexecdir}/cni` plugin directory. The workflow verifies the metadata and
+allowed file set, stages the changes, then creates and publishes signed commits
+through `push-signed-commits`; the agent does not commit or push. A new mirror
+branch is initialized from the selected upstream branch. Do not modify other
+files, reset, or force-push a mirror branch.
+
+The metadata records `project`, `target_el`, `target_version`, `source_url`,
+`source_branch`, `spec`, and `source_sha`. A later source SHA mismatch triggers
+the agent to reconcile the mirror spec to the current upstream source.
+`scan-okd-releases.yml` collects the per-call source artifacts before composing
+release build configurations; its build matrix calls the reusable image
 workflow once per release target. `reproduce-rpm-build.yml` is the manual
-RPM-build entry point and also owns the package matrix. The sync workflow uses
-a single job: a GitHub Script step creates mirror worktrees and metadata,
-Copilot CLI replays missing commits and recreates the documented package patch
-using `.github/prompts/rpm-mirror-maintenance.md`; the workflow publishes
-commits with `push-signed-commits`. The job has `contents: write` and
-`copilot-requests: write`. Copilot uses `gpt-6-luna`, long context, and maximum
-reasoning effort. The organization must allow Copilot CLI requests billed to
-the organization. A new mirror branch is seeded with the upstream tip before
-the workflow's signed marker and compatibility commits are published.
-Copilot has file-write access but no shell access. Before signing, the workflow
-checks that the spec exactly matches the source plus the deterministic Release
-suffix and, for CRI-O EL9, only the documented CNI additions; it also rejects
-unexpected files or changed branch metadata.
+RPM-build entry point and also owns the package matrix. The sync job has
+`contents: write` and `copilot-requests: write`; Copilot uses `gpt-6-luna`,
+long context, and maximum reasoning effort. The organization must allow Copilot
+CLI requests billed to the organization.
 
-Updates append cherry-picked upstream changes to the mirror, retaining each
-change's patch equivalence. The branch-local `.rpm-mirror.json` records the
-upstream URL/branch, target EL/version, spec path, and current source revision.
-Never reset or force-push a mirror branch. The first `PATCH/` marker remains
-unchanged after later upstream updates.
-
-`conmon-rs` does need the shared EL9 mirror `rpms/conmon-rs-el9` under this
-branch-maintenance policy: CentOS Cloud has `c9s-sig-cloud` but no
-OKD-release-specific c9s branch. Use that shared branch as the mirror base and
-the `el9` target component in its patch ID. The mirror keeps source metadata
-and the deterministic release patch local to the branch; it is not needed
-because the upstream shared spec is otherwise unbuildable.
+`conmon-rs` uses the shared EL9 source branch `c9s-sig-cloud` and mirror
+`rpms/conmon-rs-el9` because CentOS Cloud has no OKD-release-specific c9s
+branch.
 
 ## CRI-O EL9 compatibility patch
 

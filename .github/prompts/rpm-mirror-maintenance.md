@@ -1,20 +1,19 @@
-Maintain the RPM mirror described by the attached JSON context. It includes
-the current spec, upstream spec, relevant upstream diff, and any conflict
-contents. Use this context when editing.
+Maintain the RPM mirror described by the attached JSON context. The workflow
+has fetched the upstream and mirror branches and configured their remotes and
+refs in the attached worktree.
 
-Missing upstream commits have already been cherry-picked when possible. If a
-cherry-pick is in progress, resolve conflicts while preserving upstream changes.
-Do not run shell commands, stage files, or continue a cherry-pick; the workflow
-handles Git operations.
+Compare the mirror worktree with `source_ref` and update only the package spec
+and `.rpm-mirror.json`. Bring the spec forward to the current upstream version,
+preserving upstream changes while applying only compatibility edits required
+for the target EL. For CRI-O on EL9, preserve the `containernetworking-plugins`
+suggestion and `%{_libexecdir}/cni` plugin directory.
 
-Recreate only compatibility changes required for the target EL. For CRI-O on
-EL9, preserve the `containernetworking-plugins` suggestion and the
-`%{_libexecdir}/cni` plugin directory. For every mirrored package, set the RPM
-`Release:` to the upstream release plus exactly
-`.fallback.<patch_id>`, before any `%{?dist}` macro. Remove an existing
-`.fallback.` suffix before replacing it. This deterministic release patch is
-required even when no functional EL compatibility change is needed.
+Update `.rpm-mirror.json` with exactly these fields: `project`, `target_el`,
+`target_version`, `source_url`, `source_branch`, `spec`, and `source_sha`.
+Set `source_sha` to the commit at `source_ref`. Do not use a deterministic
+`Release:` suffix or otherwise change `Release:` solely to identify the mirror.
 
-Do not invent other compatibility changes, alter `.rpm-mirror.json`, modify
-repository workflows, or push commits. Leave compatibility edits in the
-worktree; the workflow will create and publish signed commits.
+Do not modify files other than the package spec and `.rpm-mirror.json`. Do not
+stage, commit, push, force-push, or modify workflow or prompt files. The
+workflow validates and stages your changes, then creates and publishes the
+signed commit.
