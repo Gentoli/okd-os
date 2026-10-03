@@ -72,14 +72,18 @@ jobs:
             "refs/heads/$target_branch")
           if [[ -n "$remote_branch" ]]; then
             base_sha=$(cut -f1 <<< "$remote_branch")
-            created=false
+            if [[ "$(jq -r '.target_exists' <<< "$MIRROR")" != "true" ]]; then
+              echo "Mirror branch appeared after planning; retry the sync." >&2
+              exit 1
+            fi
+            created=$(jq -r '.bootstrap_only' <<< "$MIRROR")
           else
             git fetch --no-tags "$source_url" \
               "refs/heads/$source_branch:refs/remotes/rpm-upstream/source"
             base_sha=$(git rev-parse refs/remotes/rpm-upstream/source)
             auth=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
-            git -c \
-              "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            auth_header="AUTHORIZATION: basic $auth"
+            git -c "http.extraheader=$auth_header" \
               push "https://github.com/$GH_REPOSITORY.git" \
               "$base_sha:refs/heads/$target_branch"
             created=true
@@ -138,6 +142,8 @@ jobs:
           source_url=$(jq -r '.source_url' <<< "$MIRROR")
           target_branch=$(jq -r '.target_branch' <<< "$MIRROR")
           target_sha=$(jq -r '.target_sha' <<< "$MIRROR")
+          spec=$(jq -r '.spec' <<< "$MIRROR")
+          patch_id=$(jq -r '.patch_id' <<< "$MIRROR")
           state_file="$RUNNER_TEMP/rpm-mirror-bootstrap/state.json"
           created=$(jq -r '.created' "$state_file")
           base_sha=$(jq -r '.base_sha' "$state_file")
@@ -218,14 +224,20 @@ jobs:
 
           Recreate or refresh only compatibility changes required by
           module-patch.md. For cri-o on EL9 preserve the CNI dependency and
-          plugin-directory settings. Do not invent compatibility changes for
-          other packages, alter the local $metadata_file, modify workflows, or
-          create commits for patch edits. Leave patch edits in the worktree.
-          Cherry-pick commits may be completed as needed to resolve conflicts.
+          plugin-directory settings. For every mirrored package, set its RPM
+          Release to the upstream release plus exactly
+          ".fallback.$patch_id" before any %{?dist} macro. Remove an old
+          .fallback suffix before replacing it. This deterministic release
+          patch is required even when no functional compatibility change is
+          needed. Do not invent other compatibility changes, alter the local
+          $metadata_file, modify workflows, or create commits for patch edits.
+          Leave patch edits in the worktree. Cherry-pick commits may be
+          completed as needed to resolve conflicts.
           EOF
 
           copilot -C "$mirror_dir" \
             -p "$(cat "$RUNNER_TEMP/copilot-prompt.md")" \
+            --attachment "$GITHUB_WORKSPACE/docs/module-patch.md" \
             --model 'gpt-6-luna@max' \
             --reasoning-effort max \
             --context long_context \
@@ -233,6 +245,31 @@ jobs:
             --allow-tool=write \
             --deny-tool='shell(git push)' \
             -s
+
+          python3 - "$mirror_dir/$spec" "$patch_id" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          spec = Path(sys.argv[1])
+          patch_id = sys.argv[2]
+          text = spec.read_text()
+          releases = re.findall(r"^Release:\s*(\S+)", text, re.MULTILINE)
+          suffix = f".fallback.{patch_id}"
+          if (
+              len(releases) != 1
+              or releases[0].count(".fallback.") != 1
+              or suffix not in releases[0]
+              or (
+                  "%{?dist}" in releases[0]
+                  and releases[0].index(suffix)
+                  > releases[0].index("%{?dist}")
+              )
+          ):
+              raise SystemExit(
+                  f"{spec} does not have the required Release patch {suffix}."
+              )
+          PY
 
           if git -C "$mirror_dir" rev-parse --verify -q \
             CHERRY_PICK_HEAD >/dev/null ||
@@ -247,11 +284,12 @@ jobs:
             exit 1
           fi
 
+          git -C "$mirror_dir" add -A
           git -C "$mirror_dir" format-patch --binary --full-index \
             --no-signature --quiet \
             --output-directory "$artifact_dir/series" \
             "$current_target_sha..HEAD"
-          git -C "$mirror_dir" diff --binary HEAD \
+          git -C "$mirror_dir" diff --cached --binary HEAD \
             > "$artifact_dir/working-tree.patch"
           printf '%s\n' "$MIRROR" > "$artifact_dir/inspection.json"
           cp "$state_file" "$artifact_dir/state.json"
@@ -363,7 +401,8 @@ jobs:
           working_tree_patch="$RUNNER_TEMP/rpm-mirror-artifact/working-tree.patch"
           if [[ -s "$working_tree_patch" ]]; then
             git apply --index --binary "$working_tree_patch"
-            git commit -m "Update $(jq -r '.project' <<< "$MIRROR") compatibility patch"
+            project=$(jq -r '.project' <<< "$MIRROR")
+            git commit -m "Update $project compatibility patch"
           fi
 
           if [[ "$(git rev-parse HEAD)" == \

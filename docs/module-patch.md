@@ -28,6 +28,10 @@ Its body contains the deterministic patch ID
 characters outside letters, digits, periods, and underscores with underscores.
 For example, the CRI-O 4.22/EL9 mirror uses
 `source_1.35.5_package_cri_o_target_4.22`.
+Each mirrored spec carries `.fallback.<patch-id>` in its `Release:` value,
+before `%{?dist}`. The mirror workflow updates this deterministic release patch
+for every mirrored package, even when no additional functional EL
+compatibility change is needed; the RPM build only consumes the prepared spec.
 
 The read-only planner in `plan-rpm-mirrors.yml` requests only an OKD version.
 For that version it checks exact upstream branches and existing mirrors using
@@ -39,7 +43,8 @@ the documented package patch, and publishes resulting commits with
 `pgaskin/push-signed-commits`. Copilot has repository read access and
 `copilot-requests: write`; only the publishing job has repository write access.
 The CLI uses `gpt-6-luna@max` with the long-context tier. The organization must
-allow Copilot CLI requests billed to the organization.
+allow Copilot CLI requests billed to the organization. The workflow requests
+the 1M context tier and maximum reasoning effort.
 
 Updates append cherry-picked upstream changes to the mirror, retaining each
 change's patch equivalence. The branch-local `.rpm-mirror.json` records the
@@ -47,10 +52,12 @@ upstream URL/branch, target EL/version, spec path, and current source revision.
 Never reset or force-push a mirror branch. The first `PATCH/` marker remains
 unchanged after later upstream updates.
 
-`conmon-rs` does not need an EL9 mirror: CentOS Cloud provides the shared
-`c9s-sig-cloud` branch, which the EL9 build consumes directly. Its lack of an
-OKD-specific release branch does not require duplicating that shared source in
-this repository.
+`conmon-rs` does need the shared EL9 mirror `rpms/conmon-rs-el9` under this
+branch-maintenance policy: CentOS Cloud has `c9s-sig-cloud` but no
+OKD-release-specific c9s branch. Use that shared branch as the mirror base and
+the `el9` target component in its patch ID. The mirror keeps source metadata
+and the deterministic release patch local to the branch; it is not needed
+because the upstream shared spec is otherwise unbuildable.
 
 ## CRI-O EL9 compatibility patch
 
@@ -109,4 +116,5 @@ find "$topdir/RPMS" -type f -name '*.rpm' -print
 ```
 
 Check the RPM identity with
-`rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' <rpm-file>`.
+`rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' <rpm-file>`; the
+release should include `fallback.source_1.35.5_package_cri_o_target_4.22`.

@@ -50,7 +50,7 @@ jobs:
             args+=(--okd-version "$OKD_VERSION")
           fi
           mirrors=$(python3 .github/scripts/rpm-mirror-plan.py "${args[@]}")
-          versions=$(jq -c '[.[].target_version] | unique' <<< "$mirrors")
+          versions=$(jq -c '[.[].request_version] | unique' <<< "$mirrors")
           echo "Mirror updates required: $mirrors"
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
 

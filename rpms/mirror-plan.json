@@ -24,7 +24,7 @@
   ],
   "sources": {
     "upstream_url_pattern": "https://gitlab.com/CentOS/cloud/rpms/{project}.git",
-    "mirror_url": "https://github.com/Gentoli/okd-os.git",
+    "mirror_url_pattern": "https://github.com/{repository}.git",
     "metadata_file": ".rpm-mirror.json",
     "spec_pattern": "SPECS/{project}.spec",
     "branch_patterns": {
@@ -39,6 +39,11 @@
       "conmon-rs": {
         "9": "c9s-sig-cloud",
         "10": "cloud10s-okd-{okd_version}-el10s"
+      }
+    },
+    "shared_branch_patterns": {
+      "conmon-rs": {
+        "9": "c9s-sig-cloud"
       }
     },
     "fallback_branch_patterns": {

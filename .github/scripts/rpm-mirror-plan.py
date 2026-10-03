@@ -117,9 +117,7 @@ def read_branch_metadata(repo, ref, metadata_path):
         check=False,
     )
     if result.returncode != 0:
-        raise ValueError(
-            f"Mirror branch {ref} has no {metadata_path} metadata."
-        )
+        return None
     metadata = json.loads(result.stdout)
     required = {
         "project",
@@ -138,7 +136,7 @@ def read_branch_metadata(repo, ref, metadata_path):
     return metadata
 
 
-def inspect_mirror(row, github_repository, metadata_path):
+def inspect_mirror(row, mirror_url, metadata_path):
     target_branch = row["target_branch"]
     if not target_branch.startswith("rpms/") or not re.fullmatch(
         r"[A-Za-z0-9._/-]+", target_branch
@@ -164,16 +162,13 @@ def inspect_mirror(row, github_repository, metadata_path):
         ).stdout
         package_name, source_version = rpm_identity(spec_text)
 
-        run(
-            "git", "remote", "add", "origin",
-            f"https://github.com/{github_repository}.git",
-            cwd=repo,
-        )
-        target_sha = remote_sha(
-            f"https://github.com/{github_repository}.git", target_branch
-        )
+        run("git", "remote", "add", "origin", mirror_url, cwd=repo)
+        target_sha = remote_sha(mirror_url, target_branch)
         missing_commits = []
         existing_patch_id = ""
+        metadata_missing = False
+        bootstrap_only = False
+        target_spec = ""
         if target_sha:
             run(
                 "git", "fetch", "--quiet", "--no-tags", "origin",
@@ -181,38 +176,74 @@ def inspect_mirror(row, github_repository, metadata_path):
                 cwd=repo,
             )
             metadata = read_branch_metadata(repo, mirror_ref, metadata_path)
-            expected_metadata = (
-                row["project"],
-                row["target_el"],
-                row["target_version"],
-                row["source_url"],
-                row["source_branch"],
-                row["spec"],
-            )
-            actual_metadata = (
-                metadata["project"],
-                str(metadata["target_el"]),
-                metadata["target_version"],
-                metadata["source_url"],
-                metadata["source_branch"],
-                metadata["spec"],
-            )
-            if actual_metadata != expected_metadata:
-                raise ValueError(
-                    f"Metadata on {target_branch} does not match the "
-                    "requested mirror source."
+            if metadata is None:
+                metadata_missing = True
+                ancestor = run(
+                    "git", "merge-base", "--is-ancestor",
+                    mirror_ref, source_ref,
+                    cwd=repo,
+                    check=False,
                 )
+                bootstrap_only = ancestor.returncode == 0
+                existing_patch_id = marker_patch_id(
+                    repo, mirror_ref, row["source_branch"]
+                )
+                if not bootstrap_only and not existing_patch_id:
+                    raise ValueError(
+                        f"Mirror branch {target_branch} has neither "
+                        f"{metadata_path} nor a PATCH marker."
+                    )
+            else:
+                expected_metadata = (
+                    row["project"],
+                    row["target_el"],
+                    row["target_version"],
+                    row["source_url"],
+                    row["source_branch"],
+                    row["spec"],
+                )
+                actual_metadata = (
+                    metadata["project"],
+                    str(metadata["target_el"]),
+                    metadata["target_version"],
+                    metadata["source_url"],
+                    metadata["source_branch"],
+                    metadata["spec"],
+                )
+                if actual_metadata != expected_metadata:
+                    raise ValueError(
+                        f"Metadata on {target_branch} does not match the "
+                        "requested mirror source."
+                    )
             missing_commits = source_commits_missing(
                 repo, mirror_ref, source_ref
             )
-            existing_patch_id = marker_patch_id(
-                repo, mirror_ref, row["source_branch"]
-            )
+            target_spec = run(
+                "git", "show", f"{mirror_ref}:{row['spec']}", cwd=repo
+            ).stdout
+            if not existing_patch_id:
+                existing_patch_id = marker_patch_id(
+                    repo, mirror_ref, row["source_branch"]
+                )
 
     patch_id = (
         f"source_{safe_id(source_version)}"
         f"_package_{safe_id(package_name)}"
         f"_target_{safe_id(row['target_version'])}"
+    )
+    releases = re.findall(
+        r"^Release:\s*(\S+)", target_spec, re.MULTILINE
+    )
+    release_suffix = f".fallback.{patch_id}"
+    release_patched = (
+        len(releases) == 1
+        and releases[0].count(".fallback.") == 1
+        and release_suffix in releases[0]
+        and (
+            "%{?dist}" not in releases[0]
+            or releases[0].index(release_suffix)
+            < releases[0].index("%{?dist}")
+        )
     )
     return {
         **row,
@@ -223,14 +254,21 @@ def inspect_mirror(row, github_repository, metadata_path):
         "target_sha": target_sha,
         "missing_commits": missing_commits,
         "marker_patch_id": existing_patch_id,
+        "metadata_missing": metadata_missing,
+        "bootstrap_only": bootstrap_only,
+        "release_patched": release_patched,
         "patch_id": patch_id,
         "needs_sync": (
-            not target_sha or bool(missing_commits) or not existing_patch_id
+            not target_sha
+            or bool(missing_commits)
+            or not existing_patch_id
+            or metadata_missing
+            or not release_patched
         ),
     }
 
 
-def mirror_rows(plan, okd_version):
+def mirror_rows(plan, okd_version, github_repository):
     sources = plan["sources"]
     requested_targets = [
         target
@@ -238,6 +276,7 @@ def mirror_rows(plan, okd_version):
         if okd_version is None or target["okd_version"] == okd_version
     ]
     rows = []
+    planned_shared_branches = set()
     for target in requested_targets:
         version = target["okd_version"]
         os_version = str(target["os_version"])
@@ -249,13 +288,25 @@ def mirror_rows(plan, okd_version):
             direct_branch = format_pattern(
                 branch_pattern, project, os_version, version
             )
+            shared_source_pattern = sources.get(
+                "shared_branch_patterns", {}
+            ).get(project, {}).get(os_version)
+            shared_mirror = shared_source_pattern is not None
+            branch_version = f"el{os_version}" if shared_mirror else version
+            branch_kind = "shared" if shared_mirror else "okd_release"
             mirror_branch = format_pattern(
-                sources["mirror_branch_patterns"]["okd_release"],
+                sources["mirror_branch_patterns"][branch_kind],
                 project,
                 os_version,
-                version,
+                branch_version,
             )
-            mirror_url = sources["mirror_url"]
+            if shared_mirror and mirror_branch in planned_shared_branches:
+                continue
+            if shared_mirror:
+                planned_shared_branches.add(mirror_branch)
+            mirror_url = sources["mirror_url_pattern"].format(
+                repository=github_repository
+            )
             target_sha = remote_sha(mirror_url, mirror_branch)
             if target_sha:
                 with tempfile.TemporaryDirectory(
@@ -273,19 +324,84 @@ def mirror_rows(plan, okd_version):
                     metadata = read_branch_metadata(
                         repo, mirror_ref, sources["metadata_file"]
                     )
+                if metadata is None:
+                    source_pattern = shared_source_pattern or sources.get(
+                        "fallback_branch_patterns", {}
+                    ).get(project, {}).get(os_version)
+                    if source_pattern is None:
+                        raise ValueError(
+                            f"Cannot recover source metadata for "
+                            f"{mirror_branch}."
+                        )
+                    source_url = sources["upstream_url_pattern"].format(
+                        project=project
+                    )
+                    source_branch = format_pattern(
+                        source_pattern, project, os_version, version
+                    )
+                    spec = format_pattern(
+                        sources["spec_pattern"],
+                        project,
+                        os_version,
+                        version,
+                    )
+                else:
+                    source_url = metadata["source_url"]
+                    source_branch = metadata["source_branch"]
+                    spec = metadata["spec"]
                 row = {
-                    "id": f"{project}-el{os_version}-{version}",
+                    "id": (
+                        f"{project}-el{os_version}"
+                        if shared_mirror
+                        else f"{project}-el{os_version}-{version}"
+                    ),
                     "project": project,
                     "target_el": os_version,
-                    "target_version": version,
-                    "source_url": metadata["source_url"],
-                    "source_branch": metadata["source_branch"],
+                    "target_version": branch_version,
+                    "request_version": version,
+                    "source_url": source_url,
+                    "source_branch": source_branch,
                     "target_branch": mirror_branch,
-                    "spec": metadata["spec"],
+                    "spec": spec,
                 }
                 rows.append(
                     inspect_mirror(
-                        row, "Gentoli/okd-os", sources["metadata_file"]
+                        row, mirror_url, sources["metadata_file"]
+                    )
+                )
+                continue
+
+            if shared_mirror:
+                source_url = sources["upstream_url_pattern"].format(
+                    project=project
+                )
+                source_branch = format_pattern(
+                    shared_source_pattern, project, os_version, version
+                )
+                if not remote_sha(source_url, source_branch):
+                    raise ValueError(
+                        f"Shared source branch is missing: "
+                        f"{project}:{source_branch}"
+                    )
+                row = {
+                    "id": f"{project}-el{os_version}",
+                    "project": project,
+                    "target_el": os_version,
+                    "target_version": branch_version,
+                    "request_version": version,
+                    "source_url": source_url,
+                    "source_branch": source_branch,
+                    "target_branch": mirror_branch,
+                    "spec": format_pattern(
+                        sources["spec_pattern"],
+                        project,
+                        os_version,
+                        version,
+                    ),
+                }
+                rows.append(
+                    inspect_mirror(
+                        row, mirror_url, sources["metadata_file"]
                     )
                 )
                 continue
@@ -314,6 +430,7 @@ def mirror_rows(plan, okd_version):
                 "project": project,
                 "target_el": os_version,
                 "target_version": version,
+                "request_version": version,
                 "source_url": source_url,
                 "source_branch": source_branch,
                 "target_branch": mirror_branch,
@@ -326,7 +443,7 @@ def mirror_rows(plan, okd_version):
             }
             rows.append(
                 inspect_mirror(
-                    row, "Gentoli/okd-os", sources["metadata_file"]
+                    row, mirror_url, sources["metadata_file"]
                 )
             )
     return rows
@@ -341,7 +458,7 @@ def main():
     args = parser.parse_args()
 
     plan = json.loads(args.plan.read_text())
-    rows = mirror_rows(plan, args.okd_version)
+    rows = mirror_rows(plan, args.okd_version, args.repository)
     if args.needs_sync_only:
         rows = [row for row in rows if row["needs_sync"]]
     print(json.dumps(rows, separators=(",", ":")))

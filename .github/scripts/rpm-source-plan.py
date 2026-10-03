@@ -57,6 +57,7 @@ def main():
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--okd-version", required=True)
     parser.add_argument("--os-version", required=True)
+    parser.add_argument("--repository", default="Gentoli/okd-os")
     args = parser.parse_args()
 
     plan = json.loads(args.plan.read_text())
@@ -84,13 +85,24 @@ def main():
             os_version=args.os_version,
             okd_version=args.okd_version,
         )
-        mirror_pattern = sources["mirror_branch_patterns"]["okd_release"]
+        shared_source_pattern = sources.get(
+            "shared_branch_patterns", {}
+        ).get(project, {}).get(args.os_version)
+        shared_mirror = shared_source_pattern is not None
+        branch_version = (
+            f"el{args.os_version}" if shared_mirror else args.okd_version
+        )
+        mirror_pattern = sources["mirror_branch_patterns"][
+            "shared" if shared_mirror else "okd_release"
+        ]
         mirror_branch = mirror_pattern.format(
             project=project,
             os_version=args.os_version,
-            okd_version=args.okd_version,
+            okd_version=branch_version,
         )
-        mirror_url = sources["mirror_url"]
+        mirror_url = sources["mirror_url_pattern"].format(
+            repository=args.repository
+        )
         if remote_has_branch(mirror_url, mirror_branch):
             metadata = mirror_metadata(
                 mirror_url, mirror_branch, sources["metadata_file"]
@@ -98,7 +110,7 @@ def main():
             expected = (
                 project,
                 args.os_version,
-                args.okd_version,
+                branch_version,
             )
             actual = (
                 metadata.get("project"),

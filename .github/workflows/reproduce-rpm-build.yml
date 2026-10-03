@@ -1,0 +1,74 @@
+name: RPM Build Reproduction
+
+on:
+  workflow_dispatch:
+    inputs:
+      okd_version:
+        description: OKD version to build
+        required: true
+        default: "4.22"
+        type: string
+      os_version:
+        description: CentOS Stream major version
+        required: true
+        default: "10"
+        type: choice
+        options:
+          - "9"
+          - "10"
+      run_test:
+        description: Install and test the built RPMs
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  plan-sig-sources:
+    runs-on: ubuntu-latest
+    outputs:
+      sources: ${{ steps.plan.outputs.sources }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve package sources
+        id: plan
+        env:
+          GH_REPOSITORY: ${{ github.repository }}
+          OKD_VERSION: ${{ inputs.okd_version }}
+          OS_VERSION: ${{ inputs.os_version }}
+        run: |
+          set -euo pipefail
+          pending=$(python3 .github/scripts/rpm-mirror-plan.py \
+            --plan rpms/mirror-plan.json \
+            --repository "$GH_REPOSITORY" \
+            --okd-version "$OKD_VERSION" \
+            --needs-sync-only)
+          if [[ "$(jq -c --arg os "$OS_VERSION" \
+            '[.[] | select(.target_el == $os)] | length' \
+            <<< "$pending")" != "0" ]]; then
+            echo "RPM mirrors for OKD $OKD_VERSION EL$OS_VERSION are stale." >&2
+            echo "Run the RPM mirror planner and retry the build." >&2
+            exit 1
+          fi
+          sources=$(python3 .github/scripts/rpm-source-plan.py \
+            --plan rpms/mirror-plan.json \
+            --okd-version "$OKD_VERSION" \
+            --os-version "$OS_VERSION" \
+            --repository "$GH_REPOSITORY")
+          echo "sources=$sources" >> "$GITHUB_OUTPUT"
+
+  build-rpms:
+    needs: plan-sig-sources
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/rpm-build.yml
+    with:
+      okd_version: ${{ inputs.okd_version }}
+      os_version: ${{ inputs.os_version }}
+      sig_sources: ${{ needs.plan-sig-sources.outputs.sources }}
+      run_test: ${{ inputs.run_test }}

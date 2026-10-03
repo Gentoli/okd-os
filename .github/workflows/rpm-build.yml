@@ -1,4 +1,4 @@
-name: RPM Build Reproduction
+name: Build RPMs
 
 on:
   workflow_call:
@@ -247,7 +247,11 @@ jobs:
                     source_dir / "SOURCES" / filename,
                 )
                 source_file = next(
-                    (candidate for candidate in candidates if candidate.is_file()),
+                    (
+                        candidate
+                        for candidate in candidates
+                        if candidate.is_file()
+                    ),
                     None,
                 )
                 if source_file is None:
