@@ -1,0 +1,17 @@
+diff --git a/SPECS/cri-o.spec b/SPECS/cri-o.spec
+--- a/SPECS/cri-o.spec
++++ b/SPECS/cri-o.spec
+@@ -58,5 +58,6 @@ Requires:       container-selinux
+ Requires:       containers-common >= 1:0.1.31-14
+ Recommends:     runc >= 1.0.0-16
++Suggests:       containernetworking-plugins >= 1.0.0-1
+ Requires:       conmon >= 2.0.2-1
+ Requires:       socat
+ 
+@@ -115,5 +116,6 @@ bin/%{service_name} \
+       --selinux \
+       --cni-plugin-dir /opt/cni/bin \
++      --cni-plugin-dir "%{_libexecdir}/cni" \
+       --enable-metrics \
+       --metrics-port 9537 \
+       config > %{service_name}.conf

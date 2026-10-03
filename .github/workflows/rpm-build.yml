@@ -208,6 +208,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/source"
           for SIG_PROJECT in cri-o cri-tools conmon-rs; do
+            apply_crio_el9_patch=false
             if [[ "$SIG_PROJECT" == "conmon-rs" ]]; then
               if [[ "$OS_VERSION" == "9" ]]; then
                 sig_ref="c9s-sig-cloud"
@@ -216,6 +217,10 @@ jobs:
               else
                 sig_ref="c10s-sig-cloud"
               fi
+            elif [[ "$SIG_PROJECT" == "cri-o" &&
+              "$OS_VERSION" == "9" && "$OKD_VERSION" == "4.22" ]]; then
+              sig_ref="c10s-sig-cloud-okd-${OKD_VERSION}"
+              apply_crio_el9_patch=true
             else
               sig_ref="c${OS_VERSION}s-sig-cloud-okd-${OKD_VERSION}"
             fi
@@ -225,6 +230,11 @@ jobs:
               --branch "$sig_ref" "$source_url" "$source_dir"
             source_commit=$(git -C "$source_dir" rev-parse HEAD)
             echo "Using ${SIG_PROJECT} source ${sig_ref} at ${source_commit}"
+
+            if [[ "$apply_crio_el9_patch" == true ]]; then
+              git -C "$source_dir" apply \
+                "$GITHUB_WORKSPACE/rpm-patches/cri-o-el9.patch"
+            fi
 
             cd "$source_dir"
             centpkg-sig sources
