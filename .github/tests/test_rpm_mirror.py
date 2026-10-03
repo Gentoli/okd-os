@@ -31,6 +31,17 @@ const customRequire = (name) => name === 'node:child_process' ? {
     }
     return child.execFileSync(program, args.map(a => input.urls[a] ?? a), options);
   },
+  spawn: () => {
+    if (input.agent_output === undefined) throw new Error('Copilot requests are disabled in tests');
+    const { EventEmitter } = require('node:events');
+    const agent = new EventEmitter();
+    agent.stdout = new EventEmitter();
+    process.nextTick(() => {
+      for (const chunk of input.agent_output) agent.stdout.emit('data', Buffer.from(chunk));
+      agent.emit('close', 0);
+    });
+    return agent;
+  },
 } : require(name);
 const core = { setOutput: (name, value) => { outputs[name] = value; },
   info: () => {}, setSecret: () => {} };
@@ -39,9 +50,12 @@ const github = input.releases ? { rest: { repos: {
   getCommit: async ({ref}) => ({ data: { sha: ref + '-commit' } }),
 } } } : {};
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+const workflowProcess = input.agent_output === undefined ? process : {
+  env: process.env, stdout: { write: () => {} },
+};
 (async () => {
   try {
-    await new AsyncFunction('require', 'core', 'github', 'context', input.script)(customRequire, core, github, {});
+    await new AsyncFunction('require', 'core', 'github', 'context', 'process', input.script)(customRequire, core, github, {}, workflowProcess);
     process.stdout.write(JSON.stringify({ outputs }));
   } catch (error) {
     process.stdout.write(JSON.stringify({ error: error.message, outputs }));
@@ -177,6 +191,33 @@ class MirrorWorkflows(unittest.TestCase):
         request = self.request()
         self.seed_mirror(request)
         self.assertEqual(self.prepare(request)["outputs"], {"update": "false"})
+
+    def agent_report(self, output):
+        self.env.update({"GITHUB_WORKSPACE": str(ROOT), "WORKTREE": str(self.work)})
+        (self.runner_temp / "rpm-mirror-context.json").write_text("{}")
+        # Split the report as streamed CLI output, without making an agent request.
+        return self.run_script(script("sync-rpm-mirror.yml", "sync", "agent"),
+                               agent_output=[output[:20], output[20:]])
+
+    def test_agent_reports_preserve_order_with_literal_optional_brackets(self):
+        marker = "c3917c558a79c47db21bda758d655d7c04e6e792"
+        patch = "3e5efb7689ed7f758b0f96f545046b20dbbc6655"
+        for report in (marker, f"{marker} {patch}", f"{marker} [{patch}]",
+                       f"[{marker} {patch}]"):
+            with self.subTest(report=report):
+                result = self.agent_report(f"Created mirror commits.\n\nCOMMIT_OIDS: {report}\r\n")
+                self.assertNotIn("error", result)
+                self.assertEqual(result["outputs"]["commits"], report.replace("[", "").replace("]", ""))
+
+    def test_agent_rejects_incomplete_or_missing_commit_reports(self):
+        marker = "c3917c558a79c47db21bda758d655d7c04e6e792"
+        for report in ("No report", "COMMIT_OIDS: NONE", "COMMIT_OIDS: abc123",
+                       f"COMMIT_OIDS: {marker} [abc123]", f"COMMIT_OIDS: {marker} [",
+                       f"COMMIT_OIDS: {marker} explanation"):
+            with self.subTest(report=report):
+                result = self.agent_report(report + "\n")
+                self.assertIn("error", result)
+                self.assertEqual(result["outputs"], {})
 
     def test_advanced_upstream_replays_stack_and_lease_rejects_other_writer(self):
         request = self.request()
