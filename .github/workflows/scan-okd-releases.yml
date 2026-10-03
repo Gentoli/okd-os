@@ -6,6 +6,8 @@ on:
       - .github/workflows/build-okd-stream-coreos.yml
       - .github/workflows/rpm-build.yml
       - .github/workflows/scan-okd-releases.yml
+      - .github/scripts/rpm-source-plan.py
+      - rpms/mirror-plan.json
       - Dockerfile
       - Dockerfile.dtk
   schedule:

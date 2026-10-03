@@ -1,17 +1,20 @@
 # RPM mirror branches and compatibility patches
 
-`rpms/mirror-plan.json` is the source of truth for build targets, package source
-branches, and maintained mirrors. RPM builds consume the selected URL and
-branch directly; source selection and patch planning do not happen inside
-`rpm-build.yml`.
+`rpms/mirror-plan.json` defines build targets and source-branch patterns. Mirror
+metadata is stored in `.rpm-mirror.json` on the corresponding mirror branch,
+not on `main`. Source selection runs before the reusable `rpm-build.yml`
+workflow; the RPM build receives resolved URLs and branch names and does not
+probe upstream branches or synthesize fallback patches.
 
 ## Mirror branch layout
 
 Mirror projects in this repository only when the CentOS Cloud SIG does not
-provide the exact source branch needed by a build. Use
-`rpms/<project>-<el>-<okd-version>` when the source is OKD-release-specific and
-`rpms/<project>-<el>` when it is shared across OKD releases. Keep the full
-upstream history as the base; do not squash or force-push updates.
+provide the exact source branch needed by a build. Use the source patterns in
+`rpms/mirror-plan.json`; do not add version/EL-specific source-map entries.
+Use `rpms/<project>-<el>-<okd-version>` when the source is
+OKD-release-specific and `rpms/<project>-<el>` when it is shared across OKD
+releases. Keep the full upstream history as the base; do not squash or
+force-push updates.
 
 The first commit after the upstream base is an empty commit whose subject
 identifies the source branch:
@@ -26,19 +29,28 @@ characters outside letters, digits, periods, and underscores with underscores.
 For example, the CRI-O 4.22/EL9 mirror uses
 `source_1.35.5_package_cri_o_target_4.22`.
 
-The read-only planner in `plan-rpm-mirrors.yml` checks every source commit
-against each mirror using Git's patch-equivalence check. If a branch is absent,
-is missing an upstream change, or lacks its marker, it dispatches one
-`sync-rpm-mirror.yml` run for that mirror. The sync workflow seeds a new branch
-from its upstream tip, asks Copilot CLI to replay missing commits and recreate
-the documented package patch, then publishes resulting commits with
+The read-only planner in `plan-rpm-mirrors.yml` requests only an OKD version.
+For that version it checks exact upstream branches and existing mirrors using
+Git's patch-equivalence check. It skips when direct source branches suffice or
+all mirrors are current; otherwise it dispatches one version-scoped
+`sync-rpm-mirror.yml` run. The sync workflow seeds missing branches from their
+selected upstream tips, asks Copilot CLI to replay missing commits and recreate
+the documented package patch, and publishes resulting commits with
 `pgaskin/push-signed-commits`. Copilot has repository read access and
 `copilot-requests: write`; only the publishing job has repository write access.
-The organization must allow Copilot CLI requests billed to the organization.
+The CLI uses `gpt-6-luna@max` with the long-context tier. The organization must
+allow Copilot CLI requests billed to the organization.
 
 Updates append cherry-picked upstream changes to the mirror, retaining each
-change's patch equivalence. Never reset or force-push a mirror branch. The
-first `PATCH/` marker remains unchanged after later upstream updates.
+change's patch equivalence. The branch-local `.rpm-mirror.json` records the
+upstream URL/branch, target EL/version, spec path, and current source revision.
+Never reset or force-push a mirror branch. The first `PATCH/` marker remains
+unchanged after later upstream updates.
+
+`conmon-rs` does not need an EL9 mirror: CentOS Cloud provides the shared
+`c9s-sig-cloud` branch, which the EL9 build consumes directly. Its lack of an
+OKD-specific release branch does not require duplicating that shared source in
+this repository.
 
 ## CRI-O EL9 compatibility patch
 

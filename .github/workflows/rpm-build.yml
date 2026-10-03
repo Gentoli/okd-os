@@ -1,26 +1,6 @@
 name: RPM Build Reproduction
 
 on:
-  workflow_dispatch:
-    inputs:
-      okd_version:
-        description: OKD version to build
-        required: true
-        default: "4.22"
-        type: string
-      os_version:
-        description: CentOS Stream major version
-        required: true
-        default: "10"
-        type: choice
-        options:
-          - "9"
-          - "10"
-      run_test:
-        description: Install and test the built RPMs
-        required: true
-        default: true
-        type: boolean
   workflow_call:
     inputs:
       okd_version:
@@ -29,6 +9,10 @@ on:
         type: string
       os_version:
         description: CentOS Stream major version
+        required: true
+        type: string
+      sig_sources:
+        description: Pre-resolved SIG RPM source URLs and branches
         required: true
         type: string
       run_test:
@@ -197,24 +181,19 @@ jobs:
 
       - name: Build CentOS SIG RPMs from source plan
         env:
-          OKD_VERSION: ${{ inputs.okd_version }}
-          OS_VERSION: ${{ inputs.os_version }}
+          SIG_SOURCES: ${{ inputs.sig_sources }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import json
           import os
+          import json
           import re
           import shutil
           import subprocess
 
           workspace = Path(os.environ["GITHUB_WORKSPACE"])
-          target = f"{os.environ['OKD_VERSION']}/el{os.environ['OS_VERSION']}"
-          plan = json.loads((workspace / "rpms/mirror-plan.json").read_text())
-          sources = plan["sources"].get(target)
-          if sources is None:
-              raise SystemExit(f"No RPM source plan for {target}.")
+          sources = json.loads(os.environ["SIG_SOURCES"])
 
           (workspace / "source").mkdir(exist_ok=True)
           (workspace / "rpmbuild").mkdir(exist_ok=True)
@@ -224,12 +203,12 @@ jobs:
               topdir = workspace / "rpmbuild" / project
               spec = Path("SPECS") / f"{project}.spec"
               subprocess.run(
-                [
-                    "git", "clone", "--depth", "1", "--single-branch",
-                    "--branch", source["branch"], source["url"],
-                    str(source_dir),
-                ],
-                check=True,
+                  [
+                      "git", "clone", "--depth", "1", "--single-branch",
+                      "--branch", source["branch"], source["url"],
+                      str(source_dir),
+                  ],
+                  check=True,
               )
               revision = subprocess.check_output(
                 ["git", "-C", str(source_dir), "rev-parse", "HEAD"],
