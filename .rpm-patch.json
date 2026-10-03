@@ -1,0 +1,8 @@
+{
+  "id": "conmon-rs__c9s-sig-cloud__el9",
+  "project": "conmon-rs",
+  "source_url": "https://gitlab.com/CentOS/cloud/rpms/conmon-rs.git",
+  "source_branch": "c9s-sig-cloud",
+  "target_el": "9",
+  "target_okd_version": null
+}
