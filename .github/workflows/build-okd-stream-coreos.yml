@@ -104,31 +104,55 @@ jobs:
             }
 
             function inspectImage(imageRef) {
-              const image = JSON.parse(
-                run("skopeo", ["inspect", `docker://${imageRef}`])
-              );
-              const labels = image.Labels ?? {};
+              const fields = [
+                ".Digest",
+                'index .Labels "com.coreos.stream"',
+                'index .Labels "org.opencontainers.image.version"',
+                'index .Labels "com.coreos.buildid"',
+                'index .Labels "org.opencontainers.image.revision"',
+                'index .Labels "io.openshift.build.commit.id"',
+                'index .Labels "io.okd.source.scos-base.digest"',
+                'index .Labels "io.okd.source.scos-base.version"',
+                'index .Labels "io.okd.source.scos-base.revision"',
+                'index .Labels "io.okd.source.openshift-os.revision"',
+                'index .Labels "io.okd.source.rpm-build.run"',
+              ];
+              const format = fields
+                .map((field) => `{{${field}}}`)
+                .join('{{printf "%c" 0}}');
+              const values = run("skopeo", [
+                "inspect",
+                "--no-tags",
+                "--format",
+                format,
+                `docker://${imageRef}`,
+              ]).split("\0");
+              if (values.length !== fields.length) {
+                throw new Error("Skopeo returned incomplete image metadata.");
+              }
+              const [
+                digest,
+                stream,
+                imageVersion,
+                buildId,
+                imageRevision,
+                openshiftRevision,
+                scosBaseDigest,
+                scosBaseVersion,
+                scosBaseRevision,
+                openshiftOsRevision,
+                rpmBuildRun,
+              ] = values;
               return {
-                digest: image.Digest,
-                stream: labels["com.coreos.stream"] ?? "",
-                version:
-                  labels["org.opencontainers.image.version"] ??
-                  labels["com.coreos.buildid"] ??
-                  "unknown",
-                revision:
-                  labels["org.opencontainers.image.revision"] ??
-                  labels["io.openshift.build.commit.id"] ??
-                  "unknown",
-                scos_base_digest:
-                  labels["io.okd.source.scos-base.digest"] ?? "unknown",
-                scos_base_version:
-                  labels["io.okd.source.scos-base.version"] ?? "unknown",
-                scos_base_revision:
-                  labels["io.okd.source.scos-base.revision"] ?? "unknown",
-                openshift_os_revision:
-                  labels["io.okd.source.openshift-os.revision"] ?? "unknown",
-                rpm_build_run:
-                  labels["io.okd.source.rpm-build.run"] ?? "unknown",
+                digest,
+                stream,
+                version: imageVersion || buildId || "unknown",
+                revision: imageRevision || openshiftRevision || "unknown",
+                scos_base_digest: scosBaseDigest || "unknown",
+                scos_base_version: scosBaseVersion || "unknown",
+                scos_base_revision: scosBaseRevision || "unknown",
+                openshift_os_revision: openshiftOsRevision || "unknown",
+                rpm_build_run: rpmBuildRun || "unknown",
               };
             }
 
