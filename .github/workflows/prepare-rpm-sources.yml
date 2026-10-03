@@ -181,20 +181,20 @@ jobs:
                     temp,
                     true,
                   );
+                  const messages = git(
+                    ["log", "--format=%B%x00", targetRef],
+                    temp,
+                  ).split("\0");
+                  const marker = messages.find((message) =>
+                    message.trimStart().startsWith(`PATCH/${row.source_branch}\n`)
+                  );
+                  markerPatchId =
+                    marker?.match(/^Patch-ID:\s*(\S+)/m)?.[1] ?? "";
                   if (!metadataText) {
                     metadataMissing = true;
                     bootstrapOnly = gitSucceeded([
                       "merge-base", "--is-ancestor", targetRef, sourceRef,
                     ], temp);
-                    const messages = git(
-                      ["log", "--format=%B%x00", targetRef],
-                      temp,
-                    ).split("\0");
-                    const marker = messages.find((message) =>
-                      message.trimStart().startsWith(`PATCH/${row.source_branch}\n`)
-                    );
-                    markerPatchId =
-                      marker?.match(/^Patch-ID:\s*(\S+)/m)?.[1] ?? "";
                     if (!bootstrapOnly && !markerPatchId) {
                       throw new Error(
                         `${row.target_branch} has neither ${metadataFile} ` +
@@ -230,17 +230,6 @@ jobs:
                     .filter((line) => line.startsWith("+ "))
                     .map((line) => line.split(/\s+/)[1]);
                   targetSpec = git(["show", `${targetRef}:${row.spec}`], temp);
-                  if (!markerPatchId) {
-                    const messages = git(
-                      ["log", "--format=%B%x00", targetRef],
-                      temp,
-                    ).split("\0");
-                    const marker = messages.find((message) =>
-                      message.trimStart().startsWith(`PATCH/${row.source_branch}\n`)
-                    );
-                    markerPatchId =
-                      marker?.match(/^Patch-ID:\s*(\S+)/m)?.[1] ?? "";
-                  }
                 }
 
                 const id = patchId(
@@ -262,15 +251,10 @@ jobs:
                 return {
                   ...row,
                   source_sha: sourceSha,
-                  source_version: identity.version,
-                  package_name: identity.name,
                   target_exists: Boolean(targetSha),
                   target_sha: targetSha,
                   missing_commits: missingCommits,
                   marker_patch_id: markerPatchId,
-                  metadata_missing: metadataMissing,
-                  bootstrap_only: bootstrapOnly,
-                  release_patched: releasePatched,
                   patch_id: id,
                   needs_sync:
                     !targetSha ||
@@ -333,11 +317,6 @@ jobs:
                   osVersion,
                   version,
                 );
-                if (!branchSha(sourceUrl, sourceBranch)) {
-                  throw new Error(
-                    `Missing shared upstream branch ${sourceBranch}`,
-                  );
-                }
               } else {
                 const fallbackPattern =
                   plan.sources.fallback_branch_patterns?.[project]?.[osVersion];
@@ -353,11 +332,6 @@ jobs:
                   osVersion,
                   version,
                 );
-                if (!branchSha(sourceUrl, sourceBranch)) {
-                  throw new Error(
-                    `Missing fallback branch ${sourceBranch}`,
-                  );
-                }
               }
               mirror = inspect({
                 id: shared

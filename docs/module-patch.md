@@ -37,18 +37,26 @@ compatibility change is needed; the RPM build only consumes the prepared spec.
 
 `scan-okd-releases.yml` plans the release matrix first, then passes only the
 selected OKD/EL and package combinations in the caller's matrix of reusable
-`prepare-rpm-sources.yml` calls. Each call checks upstream and mirror state
-using Git's patch-equivalence check and emits the source map for the direct
-upstream branch or mirror branch. Stale mirrors are synchronized before the
-map is uploaded; successful synchronization is the contract that the selected
-mirror source exists, so no separate post-sync source resolver is needed. The
-callers collect the per-call artifacts into a source map. The scan composes
-release build configurations with these sources; its build matrix calls the
-reusable image workflow once per release target. `reproduce-rpm-build.yml` is
-the manual RPM-build entry point and also owns the package matrix.
-The sync workflow uses a single job: a GitHub Script step
-creates mirror worktrees and metadata, Copilot CLI replays missing commits and
-recreates the documented package patch using
+`prepare-rpm-sources.yml` calls. Each call validates the target and project,
+selects an exact upstream branch or a mirror branch, and emits that source map.
+For mirrored sources, it fetches the selected upstream ref and mirror ref,
+validates mirror metadata or the supported bootstrap state, checks
+patch-equivalent commits and the deterministic `Release:` suffix, and requests
+synchronization if anything is stale. The sync workflow consumes that work
+item: it confirms the fetched upstream SHA and mirror branch state still match
+the plan, seeds a missing mirror branch, applies missing upstream commits,
+updates metadata and the documented package patch, and validates the final
+files before signing. The extra upstream `ls-remote` and post-staging allowlist
+checks were redundant with the exact-SHA fetch and earlier working-tree
+allowlist respectively; the target-state rechecks remain to guard against
+concurrent branch changes. Successful sync is the contract that the selected
+mirror source exists, so no post-sync resolver is needed. The callers collect
+the per-call artifacts into a source map. The scan composes release build
+configurations with these sources; its build matrix calls the reusable image
+workflow once per release target. `reproduce-rpm-build.yml` is the manual
+RPM-build entry point and also owns the package matrix. The sync workflow uses
+a single job: a GitHub Script step creates mirror worktrees and metadata,
+Copilot CLI replays missing commits and recreates the documented package patch using
 `.github/prompts/rpm-mirror-maintenance.md`, and the workflow publishes commits
 with `push-signed-commits`. The job has `contents: write` and
 `copilot-requests: write`. Copilot uses `gpt-6-luna`, long context, and maximum

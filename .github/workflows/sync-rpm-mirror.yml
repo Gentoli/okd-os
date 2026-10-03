@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   sync:
+    if: inputs.mirrors != '[]'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -30,7 +31,6 @@ jobs:
           persist-credentials: false
 
       - name: Prepare mirror worktrees and metadata
-        if: inputs.mirrors != '[]'
         uses: actions/github-script@v9
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -59,16 +59,6 @@ jobs:
             const mirrors = JSON.parse(process.env.MIRRORS);
             const prepared = [];
             for (const mirror of mirrors) {
-              const currentSource = git([
-                "ls-remote", "--heads", mirror.source_url,
-                `refs/heads/${mirror.source_branch}`,
-              ], process.env.GITHUB_WORKSPACE).split(/\s+/)[0];
-              if (currentSource !== mirror.source_sha) {
-                throw new Error(
-                  `Upstream ${mirror.source_branch} changed after planning; retry.`,
-                );
-              }
-
               const currentTargetOutput = git([
                 "ls-remote", "--heads", "https://github.com/" +
                   process.env.GITHUB_REPOSITORY + ".git",
@@ -253,11 +243,9 @@ jobs:
             core.setOutput("prepared", String(prepared.length > 0));
 
       - name: Install Copilot CLI
-        if: inputs.mirrors != '[]'
         run: npm install --global @github/copilot@1.0.91
 
       - name: Recreate mirror patches with Copilot
-        if: inputs.mirrors != '[]'
         uses: actions/github-script@v9
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -576,19 +564,6 @@ jobs:
                 ["add", "-A", "--", mirror.spec, ".rpm-mirror.json"],
                 { cwd: mirror.worktree },
               );
-              const stagedPaths = execFileSync(
-                "git",
-                ["diff", "--cached", "--name-only", "-z"],
-                { cwd: mirror.worktree, encoding: "utf8" },
-              ).split("\0").filter(Boolean);
-              const unexpectedStaged = stagedPaths.filter(
-                (file) => !allowedFiles.has(file),
-              );
-              if (unexpectedStaged.length) {
-                throw new Error(
-                  `Unexpected staged mirror changes: ${unexpectedStaged.join(", ")}`,
-                );
-              }
               try {
                 execFileSync(
                   "git",
@@ -603,9 +578,8 @@ jobs:
                 );
               }
             }
-
       - name: Push signed mirror commits
-        if: inputs.mirrors != '[]'
+      - name: Push signed mirror commits
         uses: actions/github-script@v9
         env:
           GITHUB_TOKEN: ${{ github.token }}
