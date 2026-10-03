@@ -28,14 +28,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       projects: ${{ steps.matrix.outputs.projects }}
+      targets: ${{ steps.matrix.outputs.targets }}
     steps:
       - uses: actions/checkout@v4
       - id: matrix
         uses: actions/github-script@v9
+        env:
+          OKD_VERSION: ${{ inputs.okd_version }}
+          OS_VERSION: ${{ inputs.os_version }}
         with:
           script: |
             const plan = JSON.parse(require("node:fs").readFileSync("rpms/mirror-plan.json", "utf8"));
             core.setOutput("projects", JSON.stringify(plan.sources.projects));
+            core.setOutput("targets", JSON.stringify([{
+              version: process.env.OKD_VERSION, os_major: process.env.OS_VERSION,
+            }]));
 
   prepare-rpm-sources:
     needs: source-matrix
@@ -54,14 +61,19 @@ jobs:
       artifact_name: rpm-source-${{ inputs.okd_version }}-el${{ inputs.os_version }}-${{ matrix.project }}
 
   collect-rpm-sources:
-    needs: prepare-rpm-sources
+    needs: [source-matrix, prepare-rpm-sources]
     runs-on: ubuntu-latest
     outputs:
-      sources: ${{ steps.sources.outputs.sources }}
+      matrix: ${{ steps.configs.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - id: sources
         uses: ./.github/actions/collect-rpm-sources
+      - id: configs
+        uses: ./.github/actions/prepare-rpm-build-matrices
+        with:
+          targets: ${{ needs.source-matrix.outputs.targets }}
+          sources: ${{ steps.sources.outputs.sources }}
 
   build-rpms:
     needs: collect-rpm-sources
@@ -69,6 +81,6 @@ jobs:
     with:
       okd_version: ${{ inputs.okd_version }}
       os_version: ${{ inputs.os_version }}
-      sig_sources: >-
-        ${{ toJSON(fromJSON(needs.collect-rpm-sources.outputs.sources)[format('{0}/el{1}', inputs.okd_version, inputs.os_version)]) }}
+      upstream_matrix: ${{ fromJSON(needs.collect-rpm-sources.outputs.matrix)[0].upstream_matrix }}
+      sig_matrix: ${{ fromJSON(needs.collect-rpm-sources.outputs.matrix)[0].sig_matrix }}
       run_test: ${{ inputs.run_test }}

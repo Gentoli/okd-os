@@ -1,0 +1,58 @@
+name: Prepare RPM build matrices
+description: Compose target build configurations from prepared package sources
+inputs:
+  targets:
+    description: JSON array of targets with version and os_major fields
+    required: true
+  sources:
+    description: Prepared source maps keyed by OKD version and EL
+    required: true
+outputs:
+  matrix:
+    description: Target configurations with upstream_matrix and sig_matrix JSON arrays
+    value: ${{ steps.configs.outputs.matrix }}
+runs:
+  using: composite
+  steps:
+    - id: configs
+      uses: actions/github-script@v9
+      env:
+        TARGETS: ${{ inputs.targets }}
+        SOURCES: ${{ inputs.sources }}
+      with:
+        script: |
+          const fs = require("node:fs");
+          const targets = JSON.parse(process.env.TARGETS);
+          const sources = JSON.parse(process.env.SOURCES);
+          const plan = JSON.parse(fs.readFileSync("rpms/mirror-plan.json", "utf8"));
+          const matrix = targets.map((target) => {
+            const version = target.version;
+            const el = target.os_major;
+            const key = `${version}/el${el}`;
+            const packages = sources[key];
+            if (plan.sources.projects.some((project) => !packages?.[project])) {
+              throw new Error(`Missing prepared RPM sources for ${key}`);
+            }
+            const upstream = [
+              { component: "kubernetes", repository: "openshift/kubernetes", spec: "openshift.spec" },
+              { component: "oc", repository: "openshift/oc", spec: "oc.spec" },
+              { component: "ecr-credential-provider", repository: "openshift/cloud-provider-aws", spec: "ecr-credential-provider.spec" },
+              { component: "acr-credential-provider", repository: "openshift/cloud-provider-azure", spec: "acr-credential-provider.spec" },
+              { component: "gcr-credential-provider", repository: "openshift/cloud-provider-gcp", spec: "gcr-credential-provider.spec" },
+            ];
+            if (version === "4.22") {
+              upstream.push({ component: "crio-credential-provider", repository: "openshift/crio-credential-provider", spec: "crio-credential-provider.spec" });
+            }
+            const artifact = (group, project) => `${group}-${project}-rpms-okd${version}-el${el}`;
+            return {
+              ...target,
+              upstream_matrix: JSON.stringify(upstream.map((entry) => ({
+                ...entry, artifact_name: artifact("upstream", entry.component),
+              }))),
+              sig_matrix: JSON.stringify(Object.entries(packages).map(([project, source]) => ({
+                project, source_url: source.url, source_branch: source.branch,
+                artifact_name: artifact("sig", project),
+              }))),
+            };
+          });
+          core.setOutput("matrix", JSON.stringify(matrix));

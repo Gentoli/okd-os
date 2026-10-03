@@ -16,6 +16,14 @@ builds the overlays. A c10s target without a matching release image is skipped.
 `reproduce-rpm-build.yml` is the manual RPM entry point. It prepares sources
 before calling `rpm-build.yml`; SIG packages are always built when the RPM
 workflow runs. Reusable RPM and image workflows do not plan source mirrors.
+Within each RPM invocation, upstream components and SIG packages build in
+parallel matrix jobs. Each package uploads a separate artifact; the combined
+install test waits for every build to succeed. There are nine package jobs for
+4.22 and eight for 4.20, subject to the available Actions runners.
+Scan and reproduction prepare these package matrices with the shared
+`prepare-rpm-build-matrices` action after collecting source maps. The image
+workflow passes them through to the RPM workflow, which expands the supplied
+matrices directly.
 
 ## Historical 4.20 compose details
 

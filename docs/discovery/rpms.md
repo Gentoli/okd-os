@@ -118,10 +118,41 @@ Both targets currently tag the same CBS build, `conmon-rs-0.6.6-2.el10s`. Its ex
 
 ## How this relates to this repository's workflow
 
-The [RPM workflow](../../.github/workflows/rpm-build.yml) accepts one OKD-version/EL target plus flags to build CentOS SIG RPMs and run installation tests. Its caller owns the `strategy.matrix` and fans out those targets into separate reusable-workflow invocations; RPM artifacts stay in the same workflow run. Manual dispatch runs one target, defaulting to 4.22/EL10 with SIG builds and tests enabled. Each artifact is named for its OKD version and EL major version. For Kubernetes, the job takes the RPM version from `openshift-hack/images/hyperkube/Dockerfile.rhel` and applies that `version` macro consistently to the spec query, source archive name, and `rpmbuild`, rather than using the spec's `4.0.0` fallback. The separate CentOS SIG recipes build CRI-O, cri-tools, and conmon-rs from the available c9s 4.20 and c10s 4.20-4.22 package branches. They download the listed lookaside sources with `centpkg-sig sources`, install build dependencies, run `rpmbuild` locally, and upload binary RPMs only as GitHub Actions artifacts. They do not submit a CBS/Koji task or upload/push any build or artifact to CentOS infrastructure, and require no CBS credentials. A base-compose fallback requires all six package families; if the selected artifacts do not include the matching SIG RPMs, the workflow fails before compose instead of silently building an incomplete image. The CentOS SIG definitions remain downstream packaging recipes; `rpkg local` is only the separate upstream conmon-rs Makefile target.
+The [RPM workflow](../../.github/workflows/rpm-build.yml) accepts one OKD/EL
+target, prepared upstream and SIG package matrices, and an installation-test
+flag. Its caller owns the target matrix and prepares the sources before
+invoking it. Scan and manual reproduction use the shared
+`prepare-rpm-build-matrices` action to compose package matrices after source
+collection. The image workflow passes those matrices through, and RPM builds
+expand them directly without a matrix-generation job.
+Manual [reproduction](../../.github/workflows/reproduce-rpm-build.yml) defaults
+to 4.22/EL10 with tests enabled. SIG packages are always built.
 
-There is no `c9s-sig-cloud-okd-4.22` branch for CRI-O or cri-tools. The release scanner therefore disables SIG builds for 4.22/EL9, but its compose still requires those runtime RPMs plus conmon-rs in the local artifact repository. The 4.22/EL9 target remains blocked until compatible EL9 sources for those packages are available.
+Inside each invocation, upstream components and SIG packages build in separate
+parallel matrices. There are six upstream components for 4.22 and five for
+4.20, plus the three prepared SIG packages. Each upstream job calls the local
+`build-upstream-rpm` composite action once. SIG jobs consume their supplied
+URL/branch directly and do not wait for upstream component builds. A failed
+package does not cancel its matrix siblings, but the combined installation
+test requires both matrices to succeed. Available Actions runners determine
+how many package jobs can run simultaneously.
 
-Each OKD-version × EL job calls the local `build-upstream-rpm` composite action
-once per upstream component, keeping package checkout and RPM-build logic
-reusable without creating a separate matrix job per package.
+Each package uploads a unique artifact named
+`<upstream-or-sig>-<package>-rpms-okd<version>-el<major>`. Installation tests and
+image composition collect the matching artifacts with
+`*-rpms-okd<version>-el<major>`, keeping them in the same workflow run.
+
+For Kubernetes, the job takes the RPM version from
+`openshift-hack/images/hyperkube/Dockerfile.rhel` and applies the same `version`
+macro to the spec query, source archive name, and `rpmbuild`. SIG recipes
+download lookaside sources with
+`centpkg-sig --name <project> --namespace rpms sources`, install build
+dependencies, and run `rpmbuild` locally. Binary RPMs are uploaded as Actions
+artifacts; these jobs do not submit CBS/Koji builds and require no CBS
+credentials. Image composition requires the matching runtime and provider
+RPMs before composing its local artifact repository.
+
+For 4.22/EL9, upstream lacks `c9s-sig-cloud-okd-4.22` branches for CRI-O and
+cri-tools. Preparation supplies mirror branches with compatibility commits
+on the current EL10 source history. See the
+[mirror recipe](../module-patch.md) for that source contract.

@@ -11,8 +11,12 @@ on:
         description: CentOS Stream major version
         required: true
         type: string
-      sig_sources:
-        description: Prepared SIG package source URLs and branches
+      upstream_matrix:
+        description: Prepared upstream component build matrix
+        required: true
+        type: string
+      sig_matrix:
+        description: Prepared SIG package build matrix with source URLs and branches
         required: true
         type: string
       run_test:
@@ -26,8 +30,12 @@ permissions:
 jobs:
   build-rpms:
     name: >-
-      Build RPMs for ${{ inputs.okd_version }}
+      Build ${{ matrix.component }} for ${{ inputs.okd_version }}
       (EL${{ inputs.os_version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.upstream_matrix) }}
     runs-on: ubuntu-latest
     container:
       image: quay.io/centos/centos:stream${{ inputs.os_version }}
@@ -68,67 +76,19 @@ jobs:
             github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Build Kubernetes RPM
+      - name: Build upstream component RPMs
         uses: ./.github/actions/build-upstream-rpm
         with:
-          component: kubernetes
-          repository: openshift/kubernetes
-          spec-file: openshift.spec
-          okd-version: ${{ inputs.okd_version }}
-          os-version: ${{ inputs.os_version }}
-
-      - name: Build OpenShift CLI RPM
-        uses: ./.github/actions/build-upstream-rpm
-        with:
-          component: oc
-          repository: openshift/oc
-          spec-file: oc.spec
-          okd-version: ${{ inputs.okd_version }}
-          os-version: ${{ inputs.os_version }}
-
-      - name: Build ECR credential provider RPM
-        uses: ./.github/actions/build-upstream-rpm
-        with:
-          component: ecr-credential-provider
-          repository: openshift/cloud-provider-aws
-          spec-file: ecr-credential-provider.spec
-          okd-version: ${{ inputs.okd_version }}
-          os-version: ${{ inputs.os_version }}
-
-      - name: Build ACR credential provider RPM
-        uses: ./.github/actions/build-upstream-rpm
-        with:
-          component: acr-credential-provider
-          repository: openshift/cloud-provider-azure
-          spec-file: acr-credential-provider.spec
-          okd-version: ${{ inputs.okd_version }}
-          os-version: ${{ inputs.os_version }}
-
-      - name: Build GCR credential provider RPM
-        uses: ./.github/actions/build-upstream-rpm
-        with:
-          component: gcr-credential-provider
-          repository: openshift/cloud-provider-gcp
-          spec-file: gcr-credential-provider.spec
-          okd-version: ${{ inputs.okd_version }}
-          os-version: ${{ inputs.os_version }}
-
-      - name: Build CRI-O credential provider RPM
-        if: inputs.okd_version == '4.22'
-        uses: ./.github/actions/build-upstream-rpm
-        with:
-          component: crio-credential-provider
-          repository: openshift/crio-credential-provider
-          spec-file: crio-credential-provider.spec
+          component: ${{ matrix.component }}
+          repository: ${{ matrix.repository }}
+          spec-file: ${{ matrix.spec }}
           okd-version: ${{ inputs.okd_version }}
           os-version: ${{ inputs.os_version }}
 
       - name: Archive RPM Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: >-
-            ${{ format('upstream-rpms-okd{0}-el{1}',
-            inputs.okd_version, inputs.os_version) }}
+          name: ${{ matrix.artifact_name }}
           path: |
             source/*/_output/local/releases/rpms/
             source/*/_output/releases/rpms/
@@ -138,9 +98,12 @@ jobs:
 
   build-rpms-centos-sig:
     name: >-
-      Build CentOS SIG RPMs for ${{ inputs.okd_version }}
+      Build SIG ${{ matrix.project }} for ${{ inputs.okd_version }}
       (EL${{ inputs.os_version }})
-    needs: build-rpms
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.sig_matrix) }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
     container:
@@ -174,55 +137,53 @@ jobs:
           graphroot = "/var/lib/containers/storage"
           EOF
 
-      - name: Build CentOS SIG RPMs from prepared branches
+      - name: Build CentOS SIG RPMs from the prepared branch
         env:
-          SIG_SOURCES: ${{ inputs.sig_sources }}
+          SIG_PROJECT: ${{ matrix.project }}
+          SOURCE_URL: ${{ matrix.source_url }}
+          SOURCE_BRANCH: ${{ matrix.source_branch }}
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/source"
-          while IFS=$'\t' read -r SIG_PROJECT source_url sig_ref; do
-            source_dir="$GITHUB_WORKSPACE/source/$SIG_PROJECT"
-            git clone --depth 1 --single-branch \
-              --branch "$sig_ref" "$source_url" "$source_dir"
-            source_commit=$(git -C "$source_dir" rev-parse HEAD)
-            echo "Using ${SIG_PROJECT} source ${sig_ref} at ${source_commit}"
+          source_dir="$GITHUB_WORKSPACE/source/$SIG_PROJECT"
+          git clone --depth 1 --single-branch \
+            --branch "$SOURCE_BRANCH" "$SOURCE_URL" "$source_dir"
+          source_commit=$(git -C "$source_dir" rev-parse HEAD)
+          echo "Using ${SIG_PROJECT} source ${SOURCE_BRANCH} at ${source_commit}"
 
-            cd "$source_dir"
-            centpkg-sig --name "$SIG_PROJECT" --namespace rpms sources
-            spec="SPECS/${SIG_PROJECT}.spec"
-            if [ ! -f "$spec" ] || [ ! -f sources ]; then
-              echo "Expected $spec and the package sources manifest."
+          cd "$source_dir"
+          centpkg-sig --name "$SIG_PROJECT" --namespace rpms sources
+          spec="SPECS/${SIG_PROJECT}.spec"
+          if [ ! -f "$spec" ] || [ ! -f sources ]; then
+            echo "Expected $spec and the package sources manifest."
+            exit 1
+          fi
+          topdir="$GITHUB_WORKSPACE/rpmbuild/$SIG_PROJECT"
+          mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          while IFS= read -r filename; do
+            source_file="$filename"
+            if [ ! -f "$source_file" ] && [ -f "SOURCES/$filename" ]; then
+              source_file="SOURCES/$filename"
+            fi
+            if [ ! -f "$source_file" ]; then
+              echo "Missing lookaside source: $filename"
               exit 1
             fi
-            topdir="$GITHUB_WORKSPACE/rpmbuild/$SIG_PROJECT"
-            mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-            while IFS= read -r filename; do
-              source_file="$filename"
-              if [ ! -f "$source_file" ] && [ -f "SOURCES/$filename" ]; then
-                source_file="SOURCES/$filename"
-              fi
-              if [ ! -f "$source_file" ]; then
-                echo "Missing lookaside source: $filename"
-                exit 1
-              fi
-              cp "$source_file" "$topdir/SOURCES/"
-            done < <(sed -nE 's/^[^ ]+ \(([^)]+)\) = .*/\1/p' sources)
-            if [ -d SOURCES ]; then
-              cp -a SOURCES/. "$topdir/SOURCES/"
-            fi
-            dnf builddep -y "$spec"
-            rpmbuild -ba "$spec" \
-              --define "_topdir $topdir" \
-              --define "_sourcedir $topdir/SOURCES"
-          done < <(python3 -c 'import json, os; sources = json.loads(os.environ["SIG_SOURCES"]); print("\n".join("\t".join((project, source["url"], source["branch"])) for project, source in sources.items()))')
+            cp "$source_file" "$topdir/SOURCES/"
+          done < <(sed -nE 's/^[^ ]+ \(([^)]+)\) = .*/\1/p' sources)
+          if [ -d SOURCES ]; then
+            cp -a SOURCES/. "$topdir/SOURCES/"
+          fi
+          dnf builddep -y "$spec"
+          rpmbuild -ba "$spec" \
+            --define "_topdir $topdir" \
+            --define "_sourcedir $topdir/SOURCES"
         shell: bash
 
       - name: Archive CentOS SIG source build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: >-
-            ${{ format('sig-rpms-okd{0}-el{1}',
-            inputs.okd_version, inputs.os_version) }}
+          name: ${{ matrix.artifact_name }}
           path: rpmbuild/**/RPMS/**/*.rpm
           if-no-files-found: error
 
