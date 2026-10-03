@@ -56,9 +56,9 @@ configurations with these sources; its build matrix calls the reusable image
 workflow once per release target. `reproduce-rpm-build.yml` is the manual
 RPM-build entry point and also owns the package matrix. The sync workflow uses
 a single job: a GitHub Script step creates mirror worktrees and metadata,
-Copilot CLI replays missing commits and recreates the documented package patch using
-`.github/prompts/rpm-mirror-maintenance.md`, and the workflow publishes commits
-with `push-signed-commits`. The job has `contents: write` and
+Copilot CLI replays missing commits and recreates the documented package patch
+using `.github/prompts/rpm-mirror-maintenance.md`; the workflow publishes
+commits with `push-signed-commits`. The job has `contents: write` and
 `copilot-requests: write`. Copilot uses `gpt-6-luna`, long context, and maximum
 reasoning effort. The organization must allow Copilot CLI requests billed to
 the organization. A new mirror branch is seeded with the upstream tip before

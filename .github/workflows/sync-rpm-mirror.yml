@@ -578,7 +578,7 @@ jobs:
                 );
               }
             }
-      - name: Push signed mirror commits
+
       - name: Push signed mirror commits
         uses: actions/github-script@v9
         env:
