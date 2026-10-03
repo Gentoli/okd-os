@@ -6,22 +6,14 @@ on:
       - main
     paths:
       - .github/workflows/build-scos-base.yml
-      - os/base/c9s/patches/**
+      - os/base/**
   workflow_dispatch:
     inputs:
-      tag:
-        description: Additional GHCR image tag
-        required: true
-        default: c9s
-        type: string
       config_ref:
         description: Branch, tag, or commit of coreos/rhel-coreos-config
         required: true
         default: HEAD
         type: string
-
-env:
-  COREOS_CONFIG_PATH: os/base/c9s/source
 
 permissions:
   contents: read
@@ -33,7 +25,12 @@ concurrency:
 
 jobs:
   build-and-push:
+    name: Build ${{ matrix.stream }} base
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stream: [c9s]
     container:
       image: quay.io/coreos-assembler/coreos-assembler:latest
       options: >-
@@ -53,7 +50,7 @@ jobs:
             exit 1
           fi
 
-          dnf install -y nodejs docker-cli
+          dnf install -y nodejs docker-cli podman
 
           kvm_gid=$(stat -c '%g' /dev/kvm)
           if kvm_group=$(getent group "$kvm_gid"); then
@@ -74,39 +71,48 @@ jobs:
         with:
           repository: coreos/rhel-coreos-config
           ref: ${{ inputs.config_ref != 'HEAD' && inputs.config_ref || '' }}
-          path: ${{ env.COREOS_CONFIG_PATH }}
+          path: os/base/${{ matrix.stream }}/source
           submodules: recursive
           persist-credentials: false
 
-      - name: Apply local c9s patches
-        working-directory: ${{ env.COREOS_CONFIG_PATH }}
+      - name: Apply local SCOS patches
+        env:
+          STREAM: ${{ matrix.stream }}
         run: |
           set -euo pipefail
-          patch="$GITHUB_WORKSPACE/os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch"
-          git apply --check "$patch"
-          git apply "$patch"
-          git diff --check
+          config_path="$GITHUB_WORKSPACE/os/base/${STREAM}/source"
+          patch_dir="$GITHUB_WORKSPACE/os/base/${STREAM}/patches"
+          shopt -s nullglob
+          patches=("$patch_dir"/*.patch)
+          for patch in "${patches[@]}"; do
+            echo "Applying ${patch##*/}"
+            git -C "$config_path" apply "$patch"
+          done
+          git -C "$config_path" diff --check
+          config_revision=$(git -C "$config_path" rev-parse HEAD)
+          echo "COREOS_CONFIG_REVISION=$config_revision" >> "$GITHUB_ENV"
 
-      - name: Build c9s base image
+      - name: Build SCOS base image
         run: |
           set -euo pipefail
-          build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
+          build_dir="$GITHUB_WORKSPACE/os/base/${{ matrix.stream }}/build"
           mkdir -p "$build_dir"
           chown builder:builder "$build_dir"
           runuser -u builder -- env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
-            COREOS_CONFIG_PATH="$COREOS_CONFIG_PATH" \
+            COREOS_CONFIG_PATH="os/base/${{ matrix.stream }}/source" \
+            COREOS_STREAM="${{ matrix.stream }}" \
             /bin/bash -euo pipefail -c '
-              cd "$GITHUB_WORKSPACE/os/base/c9s/build"
-              coreos-assembler init --variant c9s \
+              cd "$GITHUB_WORKSPACE/os/base/$COREOS_STREAM/build"
+              coreos-assembler init --variant "$COREOS_STREAM" \
                 "$GITHUB_WORKSPACE/$COREOS_CONFIG_PATH"
               coreos-assembler build
             '
 
-      - name: Build c9s QEMU image
+      - name: Build SCOS QEMU image
         id: qemu-image
         run: |
           set -euo pipefail
-          build_dir="$GITHUB_WORKSPACE/os/base/c9s/build"
+          build_dir="$GITHUB_WORKSPACE/os/base/${{ matrix.stream }}/build"
           runuser -u builder -- /bin/bash -euo pipefail -c '
             cd "$1"
             coreos-assembler osbuild qemu
@@ -123,13 +129,21 @@ jobs:
           fi
           echo "path=${images[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Archive c9s QEMU image
-        uses: actions/upload-artifact@v4
-        with:
-          name: scos-c9s-qemu-${{ github.run_id }}
-          path: ${{ steps.qemu-image.outputs.path }}
-          compression-level: 0
-          retention-days: 90
+      - name: Locate SCOS OCI archive
+        id: oci-image
+        run: |
+          set -euo pipefail
+          build_dir="$GITHUB_WORKSPACE/os/base/${{ matrix.stream }}/build"
+          mapfile -t archives < <(
+            find "$build_dir/builds" -type f \
+              -path "*/x86_64/scos-*-ostree.x86_64.ociarchive" -print
+          )
+          if (( ${#archives[@]} != 1 )); then
+            echo "Expected one x86_64 SCOS OCI archive," \
+              "found ${#archives[@]}." >&2
+            exit 1
+          fi
+          echo "path=${archives[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -138,31 +152,54 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish c9s base image
+      - name: Publish SCOS QEMU disk to GHCR
         env:
-          IMAGE_TAG: ${{ inputs.tag || 'c9s' }}
+          STREAM: ${{ matrix.stream }}
+          QEMU_IMAGE: ${{ steps.qemu-image.outputs.path }}
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/os/base/c9s/build"
-          image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/okd-os-scos-base"
-          immutable_tag="c9s-${GITHUB_SHA:0:12}"
-          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-            echo "Invalid GHCR image tag: $IMAGE_TAG" >&2
-            exit 1
-          fi
-          mapfile -t archives < <(
-            find builds -type f \
-              -path "*/x86_64/scos-*-ostree.x86_64.ociarchive" -print
-          )
-          if (( ${#archives[@]} != 1 )); then
-            echo "Expected one x86_64 SCOS OCI archive," \
-              "found ${#archives[@]}." >&2
-            exit 1
-          fi
+          image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/scos-base"
+          qemu_dir="$RUNNER_TEMP/scos-qemu"
+          mkdir -p "$qemu_dir"
+          cp "$QEMU_IMAGE" "$qemu_dir/scos-qemu.qcow2"
+          cat > "$RUNNER_TEMP/QEMU.Containerfile" <<'EOF'
+          FROM scratch
+          COPY scos-qemu.qcow2 /scos-qemu.qcow2
+          CMD ["/scos-qemu.qcow2"]
+          EOF
+          qemu_tag="${STREAM}-qemu-${GITHUB_RUN_ID}"
+          podman build \
+            --file "$RUNNER_TEMP/QEMU.Containerfile" \
+            --tag "${image_ref}:${qemu_tag}" \
+            "$qemu_dir"
+          podman push "${image_ref}:${qemu_tag}"
 
+      - name: Publish SCOS base image
+        env:
+          STREAM: ${{ matrix.stream }}
+        run: |
+          set -euo pipefail
+          image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/scos-base"
+          revision_label=org.opencontainers.image.revision
           skopeo copy \
-            "oci-archive:${archives[0]}" \
-            "docker://${image_ref}:${immutable_tag}"
-          skopeo copy \
-            "oci-archive:${archives[0]}" \
-            "docker://${image_ref}:${IMAGE_TAG}"
+            "oci-archive:${{ steps.oci-image.outputs.path }}" \
+            "containers-storage:localhost/scos-base-source:${STREAM}"
+          config_source=https://github.com/coreos/rhel-coreos-config
+          container_id=$(podman create \
+            "localhost/scos-base-source:${STREAM}")
+          trap 'podman rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          podman commit \
+            --change "LABEL org.opencontainers.image.source=${config_source}" \
+            --change "LABEL org.opencontainers.image.version=${STREAM}" \
+            --change "LABEL ${revision_label}=${COREOS_CONFIG_REVISION}" \
+            --change "LABEL io.okd.source.workflow.revision=${GITHUB_SHA}" \
+            "$container_id" "${image_ref}:${STREAM}"
+          podman rm "$container_id"
+          trap - EXIT
+          podman push --format oci \
+            "${image_ref}:${STREAM}" \
+            "docker://${image_ref}:${STREAM}"
+          podman tag "${image_ref}:${STREAM}" "${image_ref}:${STREAM}-vm"
+          podman push --format oci \
+            "${image_ref}:${STREAM}-vm" \
+            "docker://${image_ref}:${STREAM}-vm"

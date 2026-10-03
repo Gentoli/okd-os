@@ -1,9 +1,8 @@
 # OKD CoreOS artifact smoke testing
 
-Reviewed 2026-09-27. This smoke test targets the final OKD/SCOS node image
-composed from the pinned `openshift/os` source, not the separate SCOS base or
-the RPMs in isolation. The active image and test workflows now pin the
-`release-4.20` source at `847b7d8c3b60f60e86f1de0b7efebb746c75d1bc`.
+Reviewed 2026-10-02. This smoke test targets the final OKD/SCOS node image,
+not the separate SCOS base or the RPMs in isolation. The image workflow scans
+stable OKD releases 4.20, 4.21, and 4.22 and builds c9s/c10s image variants.
 
 ## Recommended base-level test
 
@@ -13,16 +12,15 @@ tests against the booted OKD image. It should not need a cluster or cloud
 account.
 
 1. Select the candidate by full GHCR pullspec. The workflow defaults to
-   `ghcr.io/gentoli/okd-stream-coreos:latest`; manual runs can supply a tag or
+   `ghcr.io/gentoli/stream-coreos:4.22-c9s`; manual runs can supply a tag or
    digest. Use a digest for a repeatable test of an exact build.
 2. Pull the candidate from GHCR and the upstream comparison image from its
    registry with Skopeo, saving each as a local OCI archive. The workflow
-   resolves `stream-coreos` from its configurable release payload with
-   `oc adm release info`; the default payload is the same pinned
-   `quay.io/okd/scos-release` image used by the release-image build workflow.
+   reads the release payload pullspec from the candidate's source labels and
+   resolves its `stream-coreos` image with `oc adm release info`.
    No 4.20 tag is published in the separate public
    `quay.io/okd/centos-stream-coreos-9` repository.
-3. Build a matching SCOS `c9s` QEMU base with COSA. This is Kola's bootable
+3. Build a matching SCOS QEMU base with COSA. This is Kola's bootable
    starting disk; the final OCI image itself is not converted to an ISO. The
    base workflow uploads the QEMU disk as a run-specific artifact.
 4. Give Kola each candidate archive with the `.ociarchive` suffix and
@@ -34,8 +32,9 @@ account.
 5. Mask Zincati in the initial VM's Ignition so its automatic update driver
    cannot block the test's manual rpm-ostree rebase. Kola supplies the test VM's
    Ignition and SSH access.
-6. Run the `openshift`-tagged Kola suite for `--distro scos`, using the pinned
-   `openshift/os` external tests. Exclude the `rhaos-pkgs-match-openshift` test:
+6. Run the `openshift`-tagged Kola suite for `--distro scos`, using the matching
+   `openshift/os` release branch's external tests. Exclude the
+   `rhaos-pkgs-match-openshift` test:
    its own description says it is RHCOS-only. The suite includes the
    Open vSwitch hugetlbfs group assertion, which declares SCOS support. Run the
    same tests independently against the upstream image and retain separate
@@ -47,20 +46,20 @@ The implemented
 [`test-okd-stream-coreos.yml`](../../.github/workflows/test-okd-stream-coreos.yml)
 workflow runs automatically after a successful main-branch image build and can
 also be dispatched manually with full image pullspecs and a SCOS base workflow
-run ID. Automatic runs use the `latest` GHCR tag, the default release payload,
-and the repository variable `OKD_SCOS_BASE_RUN_ID`; manual runs can override
-the image and release payload.
+run ID. Automatic runs use the `4.22-c9s` GHCR tag and the payload recorded in
+its source labels, plus the repository variable `OKD_SCOS_BASE_RUN_ID`; manual
+runs can override the image and release payload.
 Select a SCOS base run that produced the exact base image digest used by the
-candidate. The image build publishes `latest` on main in addition to its
-versioned and immutable run tags.
+candidate. OKD images use `<version>-<stream>` tags.
 
 ### Artifact and runner prerequisites
 
 The current
 [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml) workflow
 builds and publishes the SCOS base OCI image and its QEMU boot disk from the
-same COSA build, then uploads the disk as
-`scos-c9s-qemu-<run-id>`. The Kola workflow downloads that artifact. The
+same COSA build. It publishes the VM image as `<stream>-vm` and stores the QEMU
+disk in a GHCR image tagged `<stream>-qemu-<run-id>`. The Kola workflow pulls
+that image and extracts the QEMU disk. The
 [`build-okd-stream-coreos.yml`](../../.github/workflows/build-okd-stream-coreos.yml)
 workflow publishes the final node image to GHCR; the test pulls both candidate
 images into local OCI archives rather than passing the image build's workflow
@@ -68,8 +67,8 @@ artifact.
 
 Run the VM with QEMU/KVM on an x86_64 runner that exposes `/dev/kvm`. The
 workflow checks for that device and fails rather than silently skipping the
-boot test. The image artifact is retained for 14 days, which also limits the
-manual-dispatch window. The existing
+boot test. The GHCR QEMU image remains available until its tag is removed. The
+existing
 [`rpm-build.yml` package-install check](../../.github/workflows/rpm-build.yml)
 is useful coverage for RPM artifacts, but it does not boot the composed node
 image.

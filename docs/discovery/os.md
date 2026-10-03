@@ -6,15 +6,17 @@ before the `c9s` references were removed. The key distinction is that this
 repository builds the final OpenShift/OKD node image on top of a separate
 RHCOS/SCOS base; it does not build that base or compile its RPMs.
 
-The active image workflow now pins
-[`openshift/os` 4.20 at `847b7d8`](https://github.com/openshift/os/tree/847b7d8c3b60f60e86f1de0b7efebb746c75d1bc).
-Unlike the older snapshot documented below, this 4.20 source still uses
-`c9s-coreos`; its manifest selects CentOS 9 and the
+The image workflow scans stable OKD releases 4.20, 4.21, and 4.22 and builds
+both `c9s` and `c10s` outputs. When a release payload lacks a matching
+`stream-coreos` image, it checks out the corresponding `openshift/os` release
+branch and composes from the latest SCOS base. The 4.20 source details below
+remain a historical example: that source uses `c9s-coreos`; its manifest selects
+CentOS 9 and the
 `rhel-9.6-server-ose-4.20-okd` repo alias. The corresponding
 [`openshift/release` 4.20 config](https://github.com/openshift/release/blob/main/ci-operator/config/openshift/os/openshift-os-release-4.20.yaml)
 maps the RHEL 9.6 base input to `c9s-coreos`.
-The workflow pin and repo details are recorded in
-[`okd-os.md`](../../okd-os.md#current-target-420).
+The historical workflow pin and repo details are recorded in
+[`okd-os.md`](../../okd-os.md).
 
 ## Build and package flow
 
@@ -61,8 +63,9 @@ This repository already demonstrates the straightforward RPM-install test in
 [`rpm-build.yml`](../../.github/workflows/rpm-build.yml#L283-L316):
 
 - The build jobs upload RPMs as workflow artifacts.
-- `test-rpm-install` downloads the artifacts, runs in a CentOS Stream 9
-  container, and installs the local files with `dnf install -y "${rpms[@]}"`.
+- `test-rpm-install` downloads the version/stream-matched artifacts, runs in a
+  matching CentOS Stream 9 or 10 container, and installs them with
+  `dnf install -y "${rpms[@]}"`.
   It enables the repositories needed for dependency resolution first.
 - The following step checks that packaged executables exist and records their
   version output.
@@ -106,12 +109,12 @@ base-image substitute: it is an older, bootable final node image. A Docker
 pull and package query showed OpenShift packages including `cri-o`,
 `openshift-kubelet`, and `openshift-clients` already in it.
 
-In particular, this repository's
-[`build-push.yml`](../../.github/workflows/build-push.yml#L36-L41) extracts
-`stream-coreos` from an OKD release payload. The upstream README identifies
-that `stream-coreos` image as the final node image built by `openshift/os`,
-not the separate SCOS base. Using it as `c9s-coreos` would therefore use the
-wrong image layer.
+The
+[`build-okd-stream-coreos.yml`](../../.github/workflows/build-okd-stream-coreos.yml)
+workflow may use `stream-coreos` from an OKD release payload as the starting
+image for its kernel overlay. That payload image is the final node image built
+by `openshift/os`, not the separate SCOS base. When no matching payload image is
+available, the workflow composes the machine image on top of `scos-base`.
 
 **Version caveat:** the pinned upstream build guide's example refers to SCOS
 4.21 and an RHEL 9.6 base, while the same commit's package manifest targets
@@ -143,17 +146,14 @@ does not claim to be a clean upstream build.
 - The corresponding compatibility patch is
   [`0001-drop-unresolvable-fwupd-plugin.patch`](../../os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch).
   [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml) applies
-  it to the `coreos/rhel-coreos-config` checkout and builds the `c9s` variant
-  with COSA. Pushes run only on `main` when the workflow or patch files change.
-  Workflow dispatch accepts an upstream config ref (default `HEAD`, which
-  checks out the repository's default branch) and an extra image tag (default
-  `c9s`). Both push and dispatch also publish a commit-specific
-  `c9s-<okd-os SHA>` tag to `ghcr.io/<owner>/okd-os-scos-base`. The checkout
-  directory is configured through the workflow-level `COREOS_CONFIG_PATH`
-  environment variable.
-- The publishing step authenticates with `docker/login-action`. Skopeo's
-  containers/image auth lookup checks its containers auth files and falls back
-  to `$HOME/.docker/config.json`, where Docker login stores credentials. The
-  login action's post-job cleanup logs out at the end of the job.
+  every patch under the selected stream's `patches` directory and builds the
+  `c9s` variant with COSA.
+  Pushes run on `main` when the workflow or base files change. Workflow
+  dispatch accepts an upstream config ref (default `HEAD`) and publishes
+  `scos-base:c9s` and `scos-base:c9s-vm`. The QEMU disk is published in GHCR
+  as `scos-base:c9s-qemu-<run-id>`. Published images include source revision
+  labels.
+- `docker/login-action` provides the GHCR credentials used when publishing.
+  The action's post-job cleanup logs out at the end of the job.
 - The COSA job container requires a runner with `/dev/kvm`; the workflow fails
   early if that device is unavailable.
