@@ -59,10 +59,8 @@ jobs:
             const entries = targets.flatMap((target) =>
               plan.sources.projects.map((project) => ({
                 entry_id: `${target.okd_version}-el${target.os_version}-${project}`,
-                target: {
-                  okd_version: target.okd_version,
-                  os_version: target.os_version,
-                },
+                okd_version: target.okd_version,
+                os_version: target.os_version,
                 project,
               })),
             );
@@ -87,7 +85,9 @@ jobs:
         uses: ./.github/actions/plan-rpm-mirrors
         with:
           repository: ${{ github.repository }}
-          targets: ${{ toJSON(matrix.target) }}
+          targets: >-
+            ${{ format('[{{"okd_version":"{0}","os_version":"{1}"}}]',
+            matrix.okd_version, matrix.os_version) }}
           project: ${{ matrix.project }}
           plan-file: rpms/mirror-plan.json
 
@@ -187,7 +187,9 @@ jobs:
         uses: ./.github/actions/resolve-rpm-sources
         with:
           repository: ${{ github.repository }}
-          targets: ${{ toJSON(matrix.target) }}
+          targets: >-
+            ${{ format('[{{"okd_version":"{0}","os_version":"{1}"}}]',
+            matrix.okd_version, matrix.os_version) }}
           project: ${{ matrix.project }}
           plan-file: rpms/mirror-plan.json
 

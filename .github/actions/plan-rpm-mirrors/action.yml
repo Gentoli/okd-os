@@ -5,7 +5,7 @@ inputs:
     description: Repository containing RPM mirror branches
     required: true
   targets:
-    description: JSON array of selected OKD version and OS version targets
+    description: JSON array containing one OKD version and OS version target
     required: true
   project:
     description: RPM project to check
@@ -18,9 +18,6 @@ outputs:
   mirrors:
     description: JSON list of missing or stale mirrors
     value: ${{ steps.plan.outputs.mirrors }}
-  needs-sync:
-    description: Whether any mirror needs synchronization
-    value: ${{ steps.plan.outputs.needs-sync }}
 runs:
   using: composite
   steps:
@@ -39,7 +36,6 @@ runs:
           const path = require("node:path");
 
           const plan = JSON.parse(fs.readFileSync(process.env.PLAN_FILE, "utf8"));
-          const [owner, repoName] = process.env.GH_REPOSITORY.split("/");
           const githubUrl = `https://github.com/${process.env.GH_REPOSITORY}.git`;
           const project = process.env.PROJECT;
 
@@ -251,103 +247,93 @@ runs:
           if (!plan.sources.projects.includes(project)) {
             throw new Error(`RPM project is not in the source plan: ${project}`);
           }
+          if (!Array.isArray(selectedTargets) || selectedTargets.length !== 1) {
+            throw new Error("Mirror planning requires exactly one RPM target.");
+          }
           const allowedTargets = new Set(
             plan.build_targets.map((target) =>
               `${target.okd_version}/el${target.os_version}`,
             ),
           );
-          const targetKeys = new Set();
+          const rows = [];
           for (const target of selectedTargets) {
             const key = `${target.okd_version}/el${target.os_version}`;
             if (!allowedTargets.has(key)) {
               throw new Error(`RPM target is not in the source plan: ${key}`);
             }
-            if (targetKeys.has(key)) {
-              throw new Error(`Duplicate RPM target: ${key}`);
-            }
-            targetKeys.add(key);
-          }
-          const targets = selectedTargets;
-          const rows = [];
-          const sharedDone = new Set();
-          for (const target of targets) {
             const version = target.okd_version;
             const osVersion = String(target.os_version);
-              const sourceUrl = plan.sources.upstream_url_pattern.replace(
-                "{project}",
-                project,
-              );
-              const sharedPattern =
-                plan.sources.shared_branch_patterns?.[project]?.[osVersion];
-              const shared = Boolean(sharedPattern);
-              const branchPattern =
-                plan.sources.branch_patterns[project][osVersion];
-              const directBranch = format(
-                branchPattern,
+            const sourceUrl = plan.sources.upstream_url_pattern.replace(
+              "{project}",
+              project,
+            );
+            const sharedPattern =
+              plan.sources.shared_branch_patterns?.[project]?.[osVersion];
+            const shared = Boolean(sharedPattern);
+            const branchPattern =
+              plan.sources.branch_patterns[project][osVersion];
+            const directBranch = format(
+              branchPattern,
+              project,
+              osVersion,
+              version,
+            );
+            const targetVersion = shared ? `el${osVersion}` : version;
+            const targetBranch = format(
+              plan.sources.mirror_branch_patterns[
+                shared ? "shared" : "okd_release"
+              ],
+              project,
+              osVersion,
+              targetVersion,
+            );
+            let sourceBranch = directBranch;
+            if (!shared && branchSha(sourceUrl, directBranch)) continue;
+            if (shared) {
+              sourceBranch = format(
+                sharedPattern,
                 project,
                 osVersion,
                 version,
               );
-              const targetVersion = shared ? `el${osVersion}` : version;
-              const targetBranch = format(
-                plan.sources.mirror_branch_patterns[
-                  shared ? "shared" : "okd_release"
-                ],
+              if (!branchSha(sourceUrl, sourceBranch)) {
+                throw new Error(`Missing shared upstream branch ${sourceBranch}`);
+              }
+            } else {
+              const fallbackPattern =
+                plan.sources.fallback_branch_patterns?.[project]?.[osVersion];
+              if (!fallbackPattern) {
+                throw new Error(
+                  `No exact source branch or fallback for ${project} EL${osVersion} OKD ${version}`,
+                );
+              }
+              sourceBranch = format(
+                fallbackPattern,
                 project,
                 osVersion,
-                targetVersion,
+                version,
               );
-              if (shared && sharedDone.has(targetBranch)) continue;
-              if (shared) sharedDone.add(targetBranch);
-
-              let sourceBranch = directBranch;
-              if (!shared && branchSha(sourceUrl, directBranch)) continue;
-              if (shared) {
-                sourceBranch = format(
-                  sharedPattern,
-                  project,
-                  osVersion,
-                  version,
-                );
-                if (!branchSha(sourceUrl, sourceBranch)) {
-                  throw new Error(`Missing shared upstream branch ${sourceBranch}`);
-                }
-              } else {
-                const fallbackPattern =
-                  plan.sources.fallback_branch_patterns?.[project]?.[osVersion];
-                if (!fallbackPattern) {
-                  throw new Error(
-                    `No exact source branch or fallback for ${project} EL${osVersion} OKD ${version}`,
-                  );
-                }
-                sourceBranch = format(
-                  fallbackPattern,
-                  project,
-                  osVersion,
-                  version,
-                );
-                if (!branchSha(sourceUrl, sourceBranch)) {
-                  throw new Error(`Missing fallback branch ${sourceBranch}`);
-                }
+              if (!branchSha(sourceUrl, sourceBranch)) {
+                throw new Error(`Missing fallback branch ${sourceBranch}`);
               }
-              const row = {
-                id: shared
-                  ? `${project}-el${osVersion}`
-                  : `${project}-el${osVersion}-${version}`,
+            }
+            const row = {
+              id: shared
+                ? `${project}-el${osVersion}`
+                : `${project}-el${osVersion}-${version}`,
+              project,
+              target_el: osVersion,
+              target_version: targetVersion,
+              request_version: version,
+              source_url: sourceUrl,
+              source_branch: sourceBranch,
+              target_branch: targetBranch,
+              spec: plan.sources.spec_pattern.replace(
+                "{project}",
                 project,
-                target_el: osVersion,
-                target_version: targetVersion,
-                request_version: version,
-                source_url: sourceUrl,
-                source_branch: sourceBranch,
-                target_branch: targetBranch,
-                spec: plan.sources.spec_pattern.replace(
-                  "{project}",
-                  project,
-                ),
-              };
-              rows.push(inspect(row, plan.sources.metadata_file));
+              ),
+            };
+            rows.push(inspect(row, plan.sources.metadata_file));
           }
           const mirrors = rows.filter((row) => row.needs_sync);
           core.setOutput("mirrors", JSON.stringify(mirrors));
-          core.setOutput("needs-sync", String(mirrors.length > 0));
