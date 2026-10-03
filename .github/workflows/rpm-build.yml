@@ -165,7 +165,9 @@ jobs:
     name: >-
       Build CentOS SIG RPMs for ${{ inputs.okd_version }}
       (EL${{ inputs.os_version }})
-    if: inputs.build_sig
+    if: >-
+      inputs.build_sig ||
+      (inputs.okd_version == '4.22' && inputs.os_version == '9')
     needs: build-rpms
     runs-on: ubuntu-latest
     timeout-minutes: 240
@@ -200,6 +202,11 @@ jobs:
           graphroot = "/var/lib/containers/storage"
           EOF
 
+      - name: Checkout Workflow Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Build CentOS SIG RPMs locally
         env:
           OKD_VERSION: ${{ inputs.okd_version }}
@@ -207,7 +214,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/source"
-          for SIG_PROJECT in cri-o cri-tools conmon-rs; do
+          SIG_PROJECTS=(cri-o cri-tools conmon-rs)
+          if [[ "$OKD_VERSION" == "4.22" && "$OS_VERSION" == "9" ]]; then
+            SIG_PROJECTS=(cri-o)
+          fi
+          for SIG_PROJECT in "${SIG_PROJECTS[@]}"; do
             apply_crio_el9_patch=false
             if [[ "$SIG_PROJECT" == "conmon-rs" ]]; then
               if [[ "$OS_VERSION" == "9" ]]; then
