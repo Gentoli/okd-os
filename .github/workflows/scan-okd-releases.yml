@@ -147,14 +147,65 @@ jobs:
     with:
       targets: ${{ needs.release-matrix.outputs.targets }}
 
-  build:
+  resolve-rpm-sources:
     needs:
       - release-matrix
       - plan-rpm-mirrors
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sources: ${{ steps.resolve.outputs.sources }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve selected RPM sources
+        id: resolve
+        uses: ./.github/actions/resolve-rpm-sources
+        with:
+          repository: ${{ github.repository }}
+          targets: ${{ needs.release-matrix.outputs.targets }}
+          plan-file: rpms/mirror-plan.json
+
+  compose-build-configs:
+    needs:
+      - release-matrix
+      - resolve-rpm-sources
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.configs.outputs.matrix }}
+    steps:
+      - name: Combine release and RPM source configurations
+        id: configs
+        uses: actions/github-script@v9
+        env:
+          RELEASES: ${{ needs.release-matrix.outputs.matrix }}
+          SOURCES: ${{ needs.resolve-rpm-sources.outputs.sources }}
+        with:
+          script: |
+            const releases = JSON.parse(process.env.RELEASES);
+            const sources = JSON.parse(process.env.SOURCES);
+            const matrix = releases.map((release) => {
+              const key = `${release.version}/el${release.os_major}`;
+              const sigSources = sources[key];
+              if (!sigSources) {
+                throw new Error(`Missing resolved RPM sources for ${key}`);
+              }
+              return {
+                ...release,
+                sig_sources: JSON.stringify(sigSources),
+              };
+            });
+            core.setOutput("matrix", JSON.stringify(matrix));
+
+  build:
+    needs:
+      - compose-build-configs
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.release-matrix.outputs.matrix) }}
+        include: ${{ fromJSON(needs.compose-build-configs.outputs.matrix) }}
     permissions:
       actions: read
       contents: read
@@ -168,5 +219,6 @@ jobs:
       base_stream: ${{ matrix.base }}
       os_major: ${{ matrix.os_major }}
       repo_version: ${{ matrix.repo_version }}
+      sig_sources: ${{ matrix.sig_sources }}
       rpm_targets: ${{ matrix.rpm_targets }}
     secrets: inherit

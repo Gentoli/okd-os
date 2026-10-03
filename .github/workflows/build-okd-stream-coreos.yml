@@ -31,6 +31,10 @@ on:
         description: OpenShift package repository version
         required: true
         type: string
+      sig_sources:
+        description: JSON map of resolved source URLs and branches for this RPM target
+        required: true
+        type: string
       rpm_targets:
         description: JSON array of RPM build targets
         required: true
@@ -212,28 +216,9 @@ jobs:
             core.setOutput("compose", String(compose));
             core.setOutput("skip_build", String(skipBuild));
 
-  plan-rpm-sources:
-    needs: resolve-source
-    if: needs.resolve-source.outputs.compose == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      sources: ${{ steps.plan.outputs.sources }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Resolve sources for the RPM build targets
-        id: plan
-        uses: ./.github/actions/resolve-rpm-sources
-        with:
-          repository: ${{ github.repository }}
-          targets: ${{ inputs.rpm_targets }}
-          plan-file: rpms/mirror-plan.json
-
   build-rpms:
     needs:
       - resolve-source
-      - plan-rpm-sources
     if: needs.resolve-source.outputs.compose == 'true'
     strategy:
       fail-fast: false
@@ -246,9 +231,7 @@ jobs:
     with:
       okd_version: ${{ matrix.okd_version }}
       os_version: ${{ matrix.os_version }}
-      sig_sources: >-
-        ${{ toJSON(fromJSON(needs.plan-rpm-sources.outputs.sources)[format(
-          '{0}/el{1}', matrix.okd_version, matrix.os_version)]) }}
+      sig_sources: ${{ inputs.sig_sources }}
       run_test: ${{ matrix.run_test }}
 
   compose-base-image:
