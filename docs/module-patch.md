@@ -1,10 +1,9 @@
 # Building the OKD 4.22 CRI-O RPM for EL9
 
-The 4.22/EL9 image build can select an RPM artifact run that has no CRI-O
-package. The CentOS Cloud SIG has a `c10s-sig-cloud-okd-4.22` CRI-O package
-branch, but no matching `c9s-sig-cloud-okd-4.22` branch. The RPM workflow
-therefore builds the EL9 package from the 4.22 EL10 spec with the small
-compatibility patch in [`rpm-patches/cri-o-el9.patch`](../rpm-patches/cri-o-el9.patch).
+The CentOS Cloud SIG has 4.22 package branches for EL10, but no matching
+`c9s-sig-cloud-okd-4.22` branches for the EL9 target. The RPM workflow first
+checks for a matching package/target-OS branch, then falls back to a matching
+target-version branch from another stream or a shared stream branch.
 
 ## Why the patch is needed
 
@@ -18,16 +17,22 @@ from the available 4.22 EL10 branch in an EL9 environment; this patch restores
 the two EL9 CNI dependency/configuration settings without reverting unrelated
 version or source changes.
 
-For 4.22/EL9, the RPM workflow builds CRI-O and cri-tools from the available
-`c10s-sig-cloud-okd-4.22` branches, while conmon-rs uses the shared
-`c9s-sig-cloud` branch. It applies this patch only to CRI-O and builds all three
-packages in the EL9 container so the image workflow's SIG RPM preflight is
-complete. Other targets keep their existing source branches and specs.
+When it falls back, it synthesizes a spec patch for every package. The stable
+patch ID is `source_<source-version>_package_<rpm-name>_target_<OKD-version>`
+(non-RPM-safe characters are replaced with underscores). The patch appends
+that ID to the RPM release, making fallback RPMs traceable and preventing
+release collisions. Generated patches are saved under
+`rpmbuild/<package>/PATCHES` and included with the SIG build artifact. For
+4.22/EL9, the separate
+[`cri-o-el9.patch`](../rpm-patches/cri-o-el9.patch) also restores the EL9 CNI
+dependency and plugin path on the CRI-O spec. The SIG build is unconditional
+and covers CRI-O, cri-tools, and conmon-rs.
 
 ## Reproduce the EL9 build locally
 
-Run these commands in CentOS Stream 9, from a clean working directory. The
-final `rpmbuild` invocation matches the workflow's local build.
+Run these commands in CentOS Stream 9, from a clean working directory. They
+reproduce the CRI-O build. For a fallback source branch, the workflow also
+stamps its generated patch ID into the RPM release.
 
 ```bash
 dnf install -y epel-release dnf-plugins-core epel-next-release
@@ -64,5 +69,7 @@ rpmbuild -ba "$spec" \
 find "$topdir/RPMS" -type f -name '*.rpm' -print
 ```
 
-The resulting RPM should be an EL9 build of CRI-O 1.35.5. Check the output
-with `rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' <rpm-file>`.
+The resulting RPM should be an EL9 build of CRI-O 1.35.5. A fallback patch ID
+for that source is
+`source_1.35.5_package_cri_o_target_4.22`. Check the output with
+`rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' <rpm-file>`.

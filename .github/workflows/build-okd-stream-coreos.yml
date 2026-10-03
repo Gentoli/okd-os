@@ -226,7 +226,6 @@ jobs:
     with:
       okd_version: ${{ matrix.okd_version }}
       os_version: ${{ matrix.os_version }}
-      build_sig: ${{ matrix.build_sig }}
       run_test: ${{ matrix.run_test }}
 
   compose-base-image:

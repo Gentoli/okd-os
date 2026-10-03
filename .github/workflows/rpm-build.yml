@@ -16,11 +16,6 @@ on:
         options:
           - "9"
           - "10"
-      build_sig:
-        description: Build CentOS SIG RPMs for this target
-        required: true
-        default: true
-        type: boolean
       run_test:
         description: Install and test the built RPMs
         required: true
@@ -36,10 +31,6 @@ on:
         description: CentOS Stream major version
         required: true
         type: string
-      build_sig:
-        description: Build CentOS SIG RPMs for this target
-        required: true
-        type: boolean
       run_test:
         description: Install and test the built RPMs
         required: true
@@ -165,9 +156,6 @@ jobs:
     name: >-
       Build CentOS SIG RPMs for ${{ inputs.okd_version }}
       (EL${{ inputs.os_version }})
-    if: >-
-      inputs.build_sig ||
-      (inputs.okd_version == '4.22' && inputs.os_version == '9')
     needs: build-rpms
     runs-on: ubuntu-latest
     timeout-minutes: 240
@@ -215,39 +203,60 @@ jobs:
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/source"
           for SIG_PROJECT in cri-o cri-tools conmon-rs; do
-            apply_crio_el9_patch=false
+            source_url="https://gitlab.com/CentOS/cloud/rpms/${SIG_PROJECT}.git"
+            source_refs=()
             if [[ "$SIG_PROJECT" == "conmon-rs" ]]; then
               if [[ "$OS_VERSION" == "9" ]]; then
-                sig_ref="c9s-sig-cloud"
+                source_refs+=("c9s-sig-cloud-okd-${OKD_VERSION}")
+                source_refs+=("c9s-sig-cloud")
+                if [[ "$OKD_VERSION" == "4.22" ]]; then
+                  source_refs+=("cloud10s-okd-${OKD_VERSION}-el10s")
+                fi
+                source_refs+=("c10s-sig-cloud")
               elif [[ "$OKD_VERSION" == "4.22" ]]; then
-                sig_ref="cloud10s-okd-${OKD_VERSION}-el10s"
+                source_refs+=("cloud10s-okd-${OKD_VERSION}-el10s")
+                source_refs+=("c10s-sig-cloud")
               else
-                sig_ref="c10s-sig-cloud"
+                source_refs+=("c10s-sig-cloud")
+                source_refs+=("c9s-sig-cloud")
               fi
-            elif [[ "$SIG_PROJECT" == "cri-o" &&
-              "$OS_VERSION" == "9" && "$OKD_VERSION" == "4.22" ]]; then
-              sig_ref="c10s-sig-cloud-okd-${OKD_VERSION}"
-              apply_crio_el9_patch=true
-            elif [[ "$SIG_PROJECT" == "cri-tools" &&
-              "$OS_VERSION" == "9" && "$OKD_VERSION" == "4.22" ]]; then
-              sig_ref="c10s-sig-cloud-okd-${OKD_VERSION}"
             else
-              sig_ref="c${OS_VERSION}s-sig-cloud-okd-${OKD_VERSION}"
+              source_refs+=(
+                "c${OS_VERSION}s-sig-cloud-okd-${OKD_VERSION}"
+              )
+              if [[ "$OS_VERSION" == "9" ]]; then
+                source_refs+=("c10s-sig-cloud-okd-${OKD_VERSION}")
+                source_refs+=("c9s-sig-cloud" "c10s-sig-cloud")
+              else
+                source_refs+=("c9s-sig-cloud-okd-${OKD_VERSION}")
+                source_refs+=("c10s-sig-cloud" "c9s-sig-cloud")
+              fi
             fi
-            source_url="https://gitlab.com/CentOS/cloud/rpms/${SIG_PROJECT}.git"
+
+            sig_ref=""
+            for candidate_ref in "${source_refs[@]}"; do
+              if git ls-remote --exit-code --heads "$source_url" \
+                "refs/heads/$candidate_ref" >/dev/null; then
+                sig_ref="$candidate_ref"
+                break
+              fi
+            done
+            if [[ -z "$sig_ref" ]]; then
+              echo "No source branch found for ${SIG_PROJECT}." >&2
+              exit 1
+            fi
+            fallback=false
+            if [[ "$sig_ref" != "${source_refs[0]}" ]]; then
+              fallback=true
+            fi
+
             source_dir="$GITHUB_WORKSPACE/source/$SIG_PROJECT"
             git clone --depth 1 --single-branch \
               --branch "$sig_ref" "$source_url" "$source_dir"
             source_commit=$(git -C "$source_dir" rev-parse HEAD)
             echo "Using ${SIG_PROJECT} source ${sig_ref} at ${source_commit}"
 
-            if [[ "$apply_crio_el9_patch" == true ]]; then
-              git -C "$source_dir" apply \
-                "$GITHUB_WORKSPACE/rpm-patches/cri-o-el9.patch"
-            fi
-
             cd "$source_dir"
-            centpkg-sig sources
             spec="SPECS/${SIG_PROJECT}.spec"
             if [ ! -f "$spec" ] || [ ! -f sources ]; then
               echo "Expected $spec and the package sources manifest."
@@ -255,6 +264,67 @@ jobs:
             fi
             topdir="$GITHUB_WORKSPACE/rpmbuild/$SIG_PROJECT"
             mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+            mkdir -p "$topdir/PATCHES"
+
+            if [[ "$fallback" == true ]]; then
+              source_version=$(rpmspec -q --qf "%{version}\n" "$spec" |
+                head -n 1)
+              package_name=$(rpmspec -q --qf "%{name}\n" "$spec" |
+                head -n 1)
+              patch_id=$(
+                printf 'source_%s_package_%s_target_%s' \
+                  "$source_version" "$package_name" "$OKD_VERSION" |
+                tr -c '[:alnum:]_.' '_'
+              )
+              patch_file="$topdir/PATCHES/${patch_id}.patch"
+              python3 - "$spec" "$patch_id" "$patch_file" <<'PY'
+          from difflib import unified_diff
+          from pathlib import Path
+          import re
+          import sys
+
+          spec_path = Path(sys.argv[1])
+          patch_id = sys.argv[2]
+          patch_path = Path(sys.argv[3])
+          original = spec_path.read_text()
+          release_line = re.compile(
+              r"^(Release:\s*)([^\r\n]*?)(\r?\n|$)", re.MULTILINE
+          )
+          matches = list(release_line.finditer(original))
+          if len(matches) != 1:
+              raise SystemExit(
+                  f"Expected one Release field in {spec_path}, "
+                  f"found {len(matches)}."
+              )
+          match = matches[0]
+          release = match.group(2).rstrip()
+          updated = (
+              original[:match.start()]
+              + f"{match.group(1)}{release}.fallback.{patch_id}"
+              + match.group(3)
+              + original[match.end():]
+          )
+          patch_path.write_text(
+              "".join(
+                  unified_diff(
+                      original.splitlines(keepends=True),
+                      updated.splitlines(keepends=True),
+                      fromfile=f"a/{spec_path.as_posix()}",
+                      tofile=f"b/{spec_path.as_posix()}",
+                  )
+              )
+          )
+          PY
+              git apply "$patch_file"
+              echo "Applied fallback patch ${patch_id} for ${SIG_PROJECT}."
+            fi
+
+            if [[ "$fallback" == true && "$SIG_PROJECT" == "cri-o" &&
+              "$OS_VERSION" == "9" && "$OKD_VERSION" == "4.22" ]]; then
+              git apply "$GITHUB_WORKSPACE/rpm-patches/cri-o-el9.patch"
+            fi
+
+            centpkg-sig sources
             while IFS= read -r filename; do
               source_file="$filename"
               if [ ! -f "$source_file" ] && [ -f "SOURCES/$filename" ]; then
@@ -286,7 +356,9 @@ jobs:
           name: >-
             ${{ format('sig-rpms-okd{0}-el{1}',
             inputs.okd_version, inputs.os_version) }}
-          path: rpmbuild/**/RPMS/**/*.rpm
+          path: |
+            rpmbuild/**/RPMS/**/*.rpm
+            rpmbuild/**/PATCHES/*.patch
           if-no-files-found: error
 
   test-rpm-install:
