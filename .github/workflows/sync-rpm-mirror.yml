@@ -23,6 +23,7 @@ jobs:
     outputs:
       plan: ${{ steps.branches.outputs.plan }}
       target_branch: ${{ steps.branches.outputs.target_branch }}
+      base_sha: ${{ steps.branches.outputs.base_sha }}
     permissions:
       contents: write
     steps:
@@ -112,11 +113,15 @@ jobs:
             }
             core.setOutput("plan", JSON.stringify(prepared));
             core.setOutput("target_branch", prepared[0].target_branch);
+            core.setOutput("base_sha", prepared[0].base_sha);
 
   agent:
     needs: prepare
     if: inputs.mirrors != '[]'
     runs-on: ubuntu-latest
+    outputs:
+      commit_oids: ${{ steps.agent.outputs.commit_oids }}
+      head_oid: ${{ steps.agent.outputs.head_oid }}
     permissions:
       contents: read
       copilot-requests: write
@@ -166,6 +171,11 @@ jobs:
               const mirrorRemote = `rpm-mirror-${mirror.id}`;
               const sourceRef = `refs/remotes/${sourceRemote}/source`;
               const targetRef = `refs/remotes/${mirrorRemote}/target`;
+              git(["config", "user.name", "RPM Mirror Maintainer"]);
+              git([
+                "config", "user.email",
+                "rpm-mirror-maintainer@users.noreply.github.com",
+              ]);
               git(["remote", "add", sourceRemote, mirror.source_url]);
               git([
                 "fetch", "--quiet", "--no-tags", sourceRemote,
@@ -224,6 +234,7 @@ jobs:
         run: npm install --global @github/copilot@1.0.91
 
       - name: Maintain RPM mirrors with Copilot
+        id: agent
         uses: actions/github-script@v9
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -231,6 +242,7 @@ jobs:
           script: |
             const { execFileSync } = require("node:child_process");
             const fs = require("node:fs");
+            const path = require("node:path");
             const mirrors = JSON.parse(
               fs.readFileSync(
                 `${process.env.RUNNER_TEMP}/rpm-mirrors.json`,
@@ -242,14 +254,14 @@ jobs:
               ".github/prompts/rpm-mirror-maintenance.md",
             );
             for (const mirror of mirrors) {
-              execFileSync("copilot", [
+              const output = execFileSync("copilot", [
                 "-C", mirror.worktree,
                 "-p",
-                "Maintain this RPM mirror using the attached instructions " +
-                  "and context. Inspect the configured upstream and mirror " +
-                  "remotes. Update only the package spec and " +
-                  "mirror metadata, " +
-                  "and leave all changes uncommitted for the workflow action.",
+                "Follow the attached RPM mirror walkthrough and context. " +
+                  "Update the package spec and mirror metadata, create local " +
+                  "commit(s), and do not push. Finish by printing every " +
+                  "commit ID you created in chronological order on one line " +
+                  "as COMMIT_OIDS: <full_oid> [<full_oid> ...].",
                 "--attachment", instruction,
                 "--attachment", mirror.context_path,
                 "--model", "gpt-6-luna",
@@ -260,143 +272,52 @@ jobs:
                 "-s",
               ], {
                 cwd: mirror.worktree,
-                stdio: "inherit",
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "inherit"],
                 env: process.env,
               });
-            }
-
-      - name: Validate and upload agent changes
-        uses: actions/github-script@v9
-        env:
-          MIRROR_PLAN: ${{ needs.prepare.outputs.plan }}
-        with:
-          script: |
-            const { execFileSync } = require("node:child_process");
-            const fs = require("node:fs");
-            const path = require("node:path");
-            const mirrors = JSON.parse(process.env.MIRROR_PLAN);
-            if (mirrors.length !== 1) {
-              throw new Error(
-                "Mirror validation expects exactly one package target.",
+              process.stdout.write(output);
+              const match = output.match(
+                /^COMMIT_OIDS:\s+([0-9a-f]{40}(?:\s+[0-9a-f]{40})*)\s*$/m,
               );
-            }
-            const mirror = mirrors[0];
-            const worktree = path.join(
-              process.env.RUNNER_TEMP,
-              "rpm-mirrors",
-              mirror.id,
-            );
-
-            function git(args) {
-              try {
-                return execFileSync("git", args, {
-                  cwd: worktree,
-                  encoding: "utf8",
-                  stdio: ["ignore", "pipe", "pipe"],
-                }).trimEnd();
-              } catch (error) {
-                const detail = error.stderr?.toString() ?? error.message;
-                throw new Error(`git ${args.join(" ")} failed: ${detail}`);
+              if (!match) {
+                throw new Error(
+                  "Copilot did not print the required COMMIT_OIDS line.",
+                );
               }
-            }
-
-            if (git(["rev-parse", "HEAD"]) !== mirror.base_sha) {
-              throw new Error(
-                `The agent committed changes for ${mirror.target_branch}; ` +
-                  "mirror commits must be created by a workflow action.",
+              const commitOids = match[1].trim().split(/\s+/);
+              const headOid = commitOids[commitOids.length - 1];
+              const workspace = process.env.GITHUB_WORKSPACE;
+              const bundleRef = "refs/heads/rpm-mirror-agent";
+              const bundlePath = path.join(
+                process.env.RUNNER_TEMP,
+                "rpm-mirror.bundle",
               );
-            }
-            if (git(["diff", "--name-only", "--diff-filter=U"])) {
-              throw new Error(
-                `Unresolved conflicts in ${mirror.target_branch}`,
-              );
-            }
-
-            const metadataPath = path.join(worktree, ".rpm-mirror.json");
-            const specPath = path.join(worktree, mirror.spec);
-            if (fs.realpathSync(worktree) !== worktree) {
-              throw new Error(
-                `Invalid mirror worktree path for ${mirror.target_branch}`,
-              );
-            }
-            for (const file of [metadataPath, specPath]) {
-              if (
-                !fs.lstatSync(file).isFile() ||
-                fs.realpathSync(file) !== file
-              ) {
-                throw new Error(`Expected a regular mirror file: ${file}`);
+              function git(args) {
+                try {
+                  return execFileSync("git", args, {
+                    cwd: workspace,
+                    encoding: "utf8",
+                    stdio: ["ignore", "pipe", "pipe"],
+                  }).trimEnd();
+                } catch (error) {
+                  const detail = error.stderr?.toString() ?? error.message;
+                  throw new Error(`git ${args.join(" ")} failed: ${detail}`);
+                }
               }
-            }
-            const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
-            const expected = {
-              project: mirror.project,
-              target_el: String(mirror.target_el),
-              target_version: mirror.target_version,
-              source_url: mirror.source_url,
-              source_branch: mirror.source_branch,
-              spec: mirror.spec,
-              source_sha: mirror.source_sha,
-            };
-            if (
-              JSON.stringify(Object.keys(metadata).sort()) !==
-                JSON.stringify(Object.keys(expected).sort()) ||
-              Object.entries(expected)
-                .some(([key, value]) => metadata[key] !== value)
-            ) {
-              throw new Error(
-                `Invalid mirror metadata for ${mirror.target_branch}`,
-              );
+              git(["update-ref", bundleRef, headOid]);
+              fs.mkdirSync(path.dirname(bundlePath), { recursive: true });
+              git(["bundle", "create", bundlePath, bundleRef]);
+              core.setOutput("commit_oids", commitOids.join(" "));
+              core.setOutput("head_oid", headOid);
+              core.info(`Agent-created commit IDs: ${commitOids.join(" ")}`);
             }
 
-            const changed = new Set();
-            for (const args of [
-              ["diff", "--name-only", "-z", "HEAD"],
-              ["diff", "--cached", "--name-only", "-z"],
-              ["ls-files", "--others", "--exclude-standard", "-z"],
-            ]) {
-              for (const file of git(args).split("\0")) {
-                if (file) changed.add(file);
-              }
-            }
-            const allowed = new Set([mirror.spec, ".rpm-mirror.json"]);
-            const unexpected = [...changed].filter(
-              (file) => !allowed.has(file),
-            );
-            if (unexpected.length) {
-              throw new Error(
-                `Unexpected mirror changes: ${unexpected.join(", ")}`,
-              );
-            }
-            if (!changed.size) {
-              throw new Error(`No mirror changes for ${mirror.target_branch}`);
-            }
-
-            const artifactRoot = path.join(
-              process.env.RUNNER_TEMP,
-              "rpm-mirror-changes",
-            );
-            fs.rmSync(artifactRoot, { recursive: true, force: true });
-            fs.mkdirSync(artifactRoot, { recursive: true });
-            fs.mkdirSync(path.dirname(path.join(artifactRoot, mirror.spec)), {
-              recursive: true,
-            });
-            fs.copyFileSync(specPath, path.join(artifactRoot, mirror.spec));
-            fs.copyFileSync(
-              metadataPath,
-              path.join(artifactRoot, ".rpm-mirror.json"),
-            );
-            fs.writeFileSync(
-              path.join(artifactRoot, "manifest.json"),
-              `${JSON.stringify({
-                ...mirror,
-              }, null, 2)}\n`,
-            );
-
-      - name: Upload agent changes
+      - name: Upload agent commits
         uses: actions/upload-artifact@v4
         with:
-          name: rpm-mirror-changes
-          path: ${{ runner.temp }}/rpm-mirror-changes/
+          name: rpm-mirror-commits
+          path: ${{ runner.temp }}/rpm-mirror.bundle
           if-no-files-found: error
           retention-days: 1
 
@@ -417,138 +338,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Download agent changes
+      - name: Download agent commits
         uses: actions/download-artifact@v4.1.3
         with:
-          name: rpm-mirror-changes
-          path: ${{ runner.temp }}/rpm-mirror-changes
+          name: rpm-mirror-commits
+          path: ${{ runner.temp }}/rpm-mirror-commits
 
-      - name: Validate and stage agent changes
-        uses: actions/github-script@v9
-        env:
-          TARGET_BRANCH: ${{ needs.prepare.outputs.target_branch }}
-          MIRROR_PLAN: ${{ needs.prepare.outputs.plan }}
-        with:
-          script: |
-            const { execFileSync } = require("node:child_process");
-            const fs = require("node:fs");
-            const path = require("node:path");
-            const root = process.env.GITHUB_WORKSPACE;
-            const artifactRoot = path.join(
-              process.env.RUNNER_TEMP,
-              "rpm-mirror-changes",
-            );
-            const manifest = JSON.parse(fs.readFileSync(
-              path.join(artifactRoot, "manifest.json"),
-              "utf8",
-            ));
-            const mirrors = JSON.parse(process.env.MIRROR_PLAN);
-            if (mirrors.length !== 1) {
-              throw new Error(
-                "Mirror publishing expects exactly one package target.",
-              );
-            }
-            const mirror = mirrors[0];
-
-            function git(args) {
-              try {
-                return execFileSync("git", args, {
-                  cwd: root,
-                  encoding: "utf8",
-                  stdio: ["ignore", "pipe", "pipe"],
-                }).trimEnd();
-              } catch (error) {
-                const detail = error.stderr?.toString() ?? error.message;
-                throw new Error(`git ${args.join(" ")} failed: ${detail}`);
-              }
-            }
-
-            if (
-              process.env.TARGET_BRANCH !== mirror.target_branch ||
-              manifest.target_branch !== mirror.target_branch ||
-              JSON.stringify(manifest) !== JSON.stringify(mirror)
-            ) {
-              throw new Error(
-                "Agent artifact targets an unexpected mirror branch.",
-              );
-            }
-            if (git(["rev-parse", "HEAD"]) !== manifest.base_sha) {
-              throw new Error(
-                `Mirror ${manifest.target_branch} changed while the agent ` +
-                  "ran; retry.",
-              );
-            }
-            const files = new Set();
-            function list(directory, prefix = "") {
-              const entries = fs.readdirSync(directory, {
-                withFileTypes: true,
-              });
-              for (const entry of entries) {
-                const relative = path.posix.join(prefix, entry.name);
-                const fullPath = path.join(directory, entry.name);
-                if (entry.isDirectory()) list(fullPath, relative);
-                else if (entry.isFile()) files.add(relative);
-                else throw new Error(`Invalid artifact entry: ${relative}`);
-              }
-            }
-            list(artifactRoot);
-            const expectedFiles = new Set([
-              "manifest.json",
-              manifest.spec,
-              ".rpm-mirror.json",
-            ]);
-            if (
-              files.size !== expectedFiles.size ||
-              [...files].some((file) => !expectedFiles.has(file))
-            ) {
-              throw new Error("Agent artifact contains unexpected files.");
-            }
-
-            const metadata = JSON.parse(fs.readFileSync(
-              path.join(artifactRoot, ".rpm-mirror.json"),
-              "utf8",
-            ));
-            const expected = {
-              project: mirror.project,
-              target_el: String(mirror.target_el),
-              target_version: mirror.target_version,
-              source_url: mirror.source_url,
-              source_branch: mirror.source_branch,
-              spec: mirror.spec,
-              source_sha: mirror.source_sha,
-            };
-            if (
-              JSON.stringify(Object.keys(metadata).sort()) !==
-                JSON.stringify(Object.keys(expected).sort()) ||
-              Object.entries(expected)
-                .some(([key, value]) => metadata[key] !== value)
-            ) {
-              throw new Error("Agent artifact has invalid mirror metadata.");
-            }
-
-            const specDestination = path.join(root, manifest.spec);
-            fs.mkdirSync(path.dirname(specDestination), { recursive: true });
-            fs.copyFileSync(
-              path.join(artifactRoot, manifest.spec),
-              specDestination,
-            );
-            fs.copyFileSync(
-              path.join(artifactRoot, ".rpm-mirror.json"),
-              path.join(root, ".rpm-mirror.json"),
-            );
-            git(["add", "--", manifest.spec, ".rpm-mirror.json"]);
-            try {
-              execFileSync("git", ["diff", "--cached", "--quiet"], {
-                cwd: root,
-                stdio: "ignore",
-              });
-              throw new Error("Agent changes are empty; refusing to publish.");
-            } catch (error) {
-              if (error.message.startsWith("Agent changes are empty")) {
-                throw error;
-              }
-              if (error.status !== 1) throw error;
-            }
+      - name: Fetch agent commits
+        run: |
+          git fetch \
+            "$RUNNER_TEMP/rpm-mirror-commits/rpm-mirror.bundle" \
+            refs/heads/rpm-mirror-agent:refs/remotes/agent/rpm-mirror-agent
 
       - name: Create signed mirror commit
         uses: pgaskin/push-signed-commits@v1.2.1
@@ -556,5 +356,5 @@ jobs:
           path: .
           repository: ${{ github.repository }}
           branch: ${{ needs.prepare.outputs.target_branch }}
-          commit-message: Update RPM mirror
+          revision: ${{ needs.prepare.outputs.base_sha }}..${{ needs.agent.outputs.head_oid }}
           github-token: ${{ github.token }}

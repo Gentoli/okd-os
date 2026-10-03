@@ -30,21 +30,21 @@ availability. No RPM `Release:` value is checked or assumed deterministic.
 When a mirror needs setup or an update, `sync-rpm-mirror.yml` prepares any
 missing target branch, then gives the agent the upstream and mirror remotes in
 a worktree. The Copilot job has `contents: read` and maintains only the package
-spec and `.rpm-mirror.json`; it cannot push repository changes. For CRI-O EL9,
-it preserves the `containernetworking-plugins` suggestion and
-`%{_libexecdir}/cni` plugin directory. A separate workflow job validates the
-agent artifact, checks the mirror branch has not moved, and stages the two
-allowed files. `push-signed-commits` creates and publishes the signed update;
-the agent does not commit or push. A new mirror branch is initialized from
-the selected upstream branch. Do not modify other files, reset, or force-push
-a mirror branch.
+spec and `.rpm-mirror.json`; it creates local commit(s), reports their IDs, and
+cannot push repository changes. The workflow does not validate agent changes.
+It transfers the commits to the publish job and passes the range from the
+prepared mirror head through the agent's last commit to
+`push-signed-commits`, which creates and publishes signed commits. For CRI-O
+EL9, the compatibility patch preserves the `containernetworking-plugins`
+suggestion and `%{_libexecdir}/cni` plugin directory. A new mirror branch is
+initialized from the selected upstream branch. Do not modify other files,
+reset, or force-push a mirror branch.
 
 The metadata records `project`, `target_el`, `target_version`, `source_url`,
 `source_branch`, `spec`, and `source_sha`. A later source SHA mismatch triggers
 the agent to reconcile the mirror spec to the current upstream source. SHAs in
-the sync workflow are also used to seed a new branch, validate the checked-out
-snapshot, and identify the branch head for signed publication; they do not
-choose the source branch.
+the sync workflow are also used to seed a new branch and define the agent commit
+range sent to the signing action; they do not choose the source branch.
 `scan-okd-releases.yml` collects the per-call source artifacts before composing
 release build configurations; its build matrix calls the reusable image
 workflow once per release target. `reproduce-rpm-build.yml` is the manual
