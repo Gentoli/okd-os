@@ -6,7 +6,12 @@ ARG STREAM_MAJOR=10
 ARG VERSION="6.12.0-243.el10"
 
 RUN dnf remove -y kernel-{core,modules,modules-core,modules-extra} kernel-{devel,devel-matched,headers} kernel-rt-{core,modules,modules-core,modules-extra} && \
-    dnf install -y gcc gcc-c++ \
+    dnf install -y \
+      --repofrompath=overlay-stream-baseos,https://mirror.stream.centos.org/${STREAM_MAJOR}-stream/BaseOS/x86_64/os/ \
+      --repofrompath=overlay-stream-appstream,https://mirror.stream.centos.org/${STREAM_MAJOR}-stream/AppStream/x86_64/os/ \
+      --enablerepo=overlay-stream-baseos \
+      --enablerepo=overlay-stream-appstream \
+      gcc gcc-c++ \
       https://mirror.stream.centos.org/${STREAM_MAJOR}-stream/BaseOS/x86_64/os/Packages/kernel-{core,modules,modules-core,modules-extra}-$VERSION.x86_64.rpm \
       https://mirror.stream.centos.org/${STREAM_MAJOR}-stream/AppStream/x86_64/os/Packages/kernel-{devel,devel-matched,headers}-$VERSION.x86_64.rpm \
       https://mirror.stream.centos.org/${STREAM_MAJOR}-stream/RT/x86_64/os/Packages/kernel-rt-{core,modules,modules-core,modules-extra}-$VERSION.x86_64.rpm && \
