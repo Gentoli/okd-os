@@ -3,12 +3,19 @@
 ## Release matrix
 
 The push/scheduled/manual `scan-okd-releases.yml` workflow currently scans the
-4.22-c9s, 4.22-c10s, and 4.20-c9s targets. It calls the reusable
-`build-okd-stream-coreos.yml` workflow for each target. A matching
+4.22-c9s, 4.22-c10s, and 4.20-c9s targets from `rpms/mirror-plan.json`. It selects
+releases first, prepares each selected package/OKD/EL source in its caller
+matrix, then collects source maps and calls the reusable
+`build-okd-stream-coreos.yml` workflow for each target. See
+[the mirror recipe](docs/module-patch.md) for the source contract. A matching
 `stream-coreos` image in the release payload is reused and receives only the
 kernel/GCC overlays. If no matching c9s image exists, the same workflow run
 builds the matching RPMs, composes the machine image from `scos-base:c9s`, then
 builds the overlays. A c10s target without a matching release image is skipped.
+
+`reproduce-rpm-build.yml` is the manual RPM entry point. It prepares sources
+before calling `rpm-build.yml`; SIG packages are always built when the RPM
+workflow runs. Reusable RPM and image workflows do not plan source mirrors.
 
 ## Historical 4.20 compose details
 

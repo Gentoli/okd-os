@@ -1,0 +1,61 @@
+# Maintain one RPM source mirror
+
+Follow the attached generic recipe in `docs/module-patch.md` and the JSON run
+context. All package and branch names come from that context. Work in the
+supplied worktree. The workflow has configured `rpm-upstream` and `rpm-mirror`,
+fetched `source_ref`, and fetched `target_ref` if the mirror exists.
+
+1. Inspect the package repository, current refs, packaging history, `SPECS`,
+   `SOURCES`, and the lookaside `sources` manifest. Do not assume the spec is the
+   only file involved in compatibility.
+2. If `target_ref` is null, checkout a local branch at `source_ref`. Create
+   `.rpm-patch.json` with the identity described below, and commit it with the
+   exact subject `PATCH/<source_branch>`. This must be the first commit after
+   the upstream base. Develop target compatibility changes using the recipe and
+   commit those changes after the marker.
+3. If the mirror exists, find its `PATCH/` marker and read its committed
+   `.rpm-patch.json`. Identify the old upstream base as the marker's parent.
+   Inspect all compatibility commits after that base. Checkout a local branch
+   at the current `source_ref`, recreate the identity commit first, then
+   cherry-pick the compatibility commits in order (or rebase the stack onto the
+   current upstream base). Resolve conflicts and revise adaptations when
+   upstream changes require it. Do not merge upstream, append a snapshot of its
+   files, or discard unrelated upstream updates. If an older mirror lacks the
+   marker, inspect its history and recreate its necessary adaptations on the
+   current source base using the same procedure.
+4. In the first commit after upstream, `.rpm-patch.json` must contain:
+
+   ```json
+   {
+     "id": "<patch_id>",
+     "project": "<project>",
+     "source_url": "<source_url>",
+     "source_branch": "<source_branch>",
+     "target_el": "<target_el>",
+     "target_okd_version": "<target_okd_version, or null for a shared target>"
+   }
+   ```
+
+   Substitute the JSON context values, preserving null as JSON null. Do not add
+   a source SHA or RPM `Release:` to the identity. The marker commit contains
+   the identity file; it need not be empty. Keep compatibility changes in the
+   subsequent commits so future updates can replay them independently.
+5. Preserve source archives and their CentOS lookaside identity. This GitHub
+   mirror is a package source checkout, despite the hosting repository's name.
+   Use packaging evidence from comparable target/source branches to identify
+   necessary changes. Do not invent compatibility patches for unaffected
+   packages. Keep the full current source history underneath the patch stack.
+6. Create ordinary local commits, including the new or recreated marker. Do
+   not create merge commits, push, invoke GitHub write APIs, sign commits, or
+   modify the workflow repository. The workflow publishes your commits through
+   the signing action. There is no separate post-agent validation step.
+7. Report the full IDs of every commit in the newly prepared patch stack,
+   beginning with the marker and ending with the final patch, in chronological
+   order. Include rewritten/cherry-picked commits with their new local IDs.
+   Finish with exactly one machine-readable line:
+
+   `COMMIT_OIDS: <full_oid> [<full_oid> ...]`
+
+An invoked update must produce the identity commit, even if the package needs
+no compatibility changes. `COMMIT_OIDS: NONE` is reserved for a no-op; do not
+use it for an absent mirror or an update that has not incorporated upstream.

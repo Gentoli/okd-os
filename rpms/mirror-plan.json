@@ -1,0 +1,23 @@
+{
+  "build_targets": [
+    { "okd_version": "4.22", "os_version": "9", "base": "c9s", "repo_version": "9.8", "run_test": true },
+    { "okd_version": "4.22", "os_version": "10", "base": "c10s", "repo_version": "10.0", "run_test": true },
+    { "okd_version": "4.20", "os_version": "9", "base": "c9s", "repo_version": "9.6", "run_test": true }
+  ],
+  "sources": {
+    "projects": ["cri-o", "cri-tools", "conmon-rs"],
+    "upstream_url_pattern": "https://gitlab.com/CentOS/cloud/rpms/{project}.git",
+    "branch_patterns": {
+      "cri-o": { "9": "c9s-sig-cloud-okd-{okd_version}", "10": "c10s-sig-cloud-okd-{okd_version}" },
+      "cri-tools": { "9": "c9s-sig-cloud-okd-{okd_version}", "10": "c10s-sig-cloud-okd-{okd_version}" },
+      "conmon-rs": { "10": "cloud10s-okd-{okd_version}-el10s" }
+    },
+    "shared_branch_patterns": {
+      "conmon-rs": { "9": "c9s-sig-cloud", "10": "c10s-sig-cloud" }
+    },
+    "fallback_branch_patterns": {
+      "cri-o": { "9": "c10s-sig-cloud-okd-{okd_version}" },
+      "cri-tools": { "9": "c10s-sig-cloud-okd-{okd_version}" }
+    }
+  }
+}

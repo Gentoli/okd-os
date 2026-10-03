@@ -2,6 +2,14 @@
 
 This documents the RPM-producing paths used by this repository's current [RPM workflow](../../.github/workflows/rpm-build.yml). OpenShift's [`openshift/release` ci-operator configuration](https://github.com/openshift/release/tree/b408f33c954929bf933101fa64895c6fbca38ebe/ci-operator/config) and the CentOS Cloud SIG's OKD package builds are separate pipelines; an upstream RPM spec alone does not identify which pipeline produced a package. Repository-file links use commit-pinned permalinks.
 
+The reusable RPM build receives prepared SIG source URLs and branches.
+`scan-okd-releases.yml` selects release targets before preparing each package;
+`reproduce-rpm-build.yml` is the manual entry point. Missing target branches
+use mirrors with their own upstream history and replayed compatibility commits.
+See [the mirror and patch recipe](../module-patch.md) for the identity marker,
+signed publication, and local reproduction procedures. Builds do not resolve
+fallback branches or check RPM `Release:` values to select sources.
+
 ## Components with OpenShift CI RPM builds
 
 ### Kubernetes (`openshift`)

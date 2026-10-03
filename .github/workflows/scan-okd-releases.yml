@@ -2,10 +2,18 @@ name: Scan OKD releases and build images
 
 on:
   push:
+    branches:
+      - main
     paths:
       - .github/workflows/build-okd-stream-coreos.yml
       - .github/workflows/rpm-build.yml
       - .github/workflows/scan-okd-releases.yml
+      - .github/workflows/prepare-rpm-sources.yml
+      - .github/workflows/sync-rpm-mirror.yml
+      - .github/actions/collect-rpm-sources/action.yml
+      - .github/prompts/rpm-mirror-maintenance.md
+      - docs/module-patch.md
+      - rpms/mirror-plan.json
       - Dockerfile
       - Dockerfile.dtk
   schedule:
@@ -22,20 +30,16 @@ jobs:
       contents: read
     outputs:
       matrix: ${{ steps.releases.outputs.matrix }}
+      source_matrix: ${{ steps.releases.outputs.source_matrix }}
     steps:
+      - uses: actions/checkout@v4
       - name: Find the latest stable OKD release payloads
         id: releases
         uses: actions/github-script@v9
         with:
           script: |
-            const targets = [
-              { version: "4.22", base: "c9s" },
-              { version: "4.22", base: "c10s" },
-              { version: "4.20", base: "c9s" },
-              // { version: "4.20", base: "c10s" },
-              // { version: "4.21", base: "c9s" },
-              // { version: "4.21", base: "c10s" },
-            ];
+            const plan = JSON.parse(require("node:fs").readFileSync("rpms/mirror-plan.json", "utf8"));
+            const targets = plan.build_targets.map((target) => ({ ...target, version: target.okd_version }));
             const versions = [
               ...new Set(targets.map(({ version }) => version)),
             ];
@@ -93,7 +97,7 @@ jobs:
             }
 
             const matrix = [];
-            for (const { version, base } of targets) {
+            for (const { version, base, os_version, repo_version, run_test } of targets) {
               const release = latestReleases[version];
               const { data: commit } = await github.rest.repos.getCommit({
                 owner: "okd-project",
@@ -107,35 +111,73 @@ jobs:
                 release_image: release.image,
                 release_commit: commit.sha,
                 base,
-                os_major: base.match(/^c(\d+)s$/)[1],
-                rpm_targets: JSON.stringify([{
-                    okd_version: version,
-                    os_version: base.match(/^c(\d+)s$/)[1],
-                    build_sig:
-                      (version === "4.22" && base === "c10s") ||
-                      (version === "4.20" && base === "c9s"),
-                    run_test:
-                      (version === "4.22" && base === "c10s") ||
-                      (version === "4.20" && base === "c9s"),
-                  }]),
-                repo_version:
-                  base === "c10s"
-                    ? "10.0"
-                    : version === "4.20"
-                      ? "9.6"
-                      : version === "4.21"
-                        ? "9.7"
-                        : "9.8",
+                os_major: os_version,
+                run_test,
+                repo_version,
               });
             }
             core.setOutput("matrix", JSON.stringify(matrix));
+            const sourceMatrix = matrix.flatMap((release) => plan.sources.projects.map((project) => ({
+              okd_version: release.version,
+              os_version: release.os_major,
+              project,
+              artifact_name: `rpm-source-${release.version}-el${release.os_major}-${project}`,
+            })));
+            core.setOutput("source_matrix", JSON.stringify(sourceMatrix));
 
-  build:
+  prepare-rpm-sources:
     needs: release-matrix
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.release-matrix.outputs.matrix) }}
+        include: ${{ fromJSON(needs.release-matrix.outputs.source_matrix) }}
+    permissions:
+      contents: write
+      copilot-requests: write
+    uses: ./.github/workflows/prepare-rpm-sources.yml
+    with:
+      okd_version: ${{ matrix.okd_version }}
+      os_version: ${{ matrix.os_version }}
+      project: ${{ matrix.project }}
+      artifact_name: ${{ matrix.artifact_name }}
+
+  compose-build-configs:
+    needs: [release-matrix, prepare-rpm-sources]
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.configs.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect prepared RPM sources
+        id: sources
+        uses: ./.github/actions/collect-rpm-sources
+      - name: Compose release build configurations
+        id: configs
+        uses: actions/github-script@v9
+        env:
+          RELEASES: ${{ needs.release-matrix.outputs.matrix }}
+          SOURCES: ${{ steps.sources.outputs.sources }}
+        with:
+          script: |
+            const releases = JSON.parse(process.env.RELEASES);
+            const sources = JSON.parse(process.env.SOURCES);
+            const plan = JSON.parse(require("node:fs").readFileSync("rpms/mirror-plan.json", "utf8"));
+            const matrix = releases.map((release) => {
+              const key = `${release.version}/el${release.os_major}`;
+              const packages = sources[key];
+              if (plan.sources.projects.some((project) => !packages?.[project])) {
+                throw new Error(`Missing prepared RPM sources for ${key}`);
+              }
+              return { ...release, sig_sources: JSON.stringify(packages) };
+            });
+            core.setOutput("matrix", JSON.stringify(matrix));
+
+  build:
+    needs: compose-build-configs
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.compose-build-configs.outputs.matrix) }}
     permissions:
       actions: read
       contents: read
@@ -149,5 +191,6 @@ jobs:
       base_stream: ${{ matrix.base }}
       os_major: ${{ matrix.os_major }}
       repo_version: ${{ matrix.repo_version }}
-      rpm_targets: ${{ matrix.rpm_targets }}
+      sig_sources: ${{ matrix.sig_sources }}
+      run_test: ${{ matrix.run_test }}
     secrets: inherit
