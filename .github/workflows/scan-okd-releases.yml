@@ -1,0 +1,141 @@
+name: Scan OKD releases and build images
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-okd-stream-coreos.yml
+      - .github/workflows/scan-okd-releases.yml
+      - Dockerfile
+      - Dockerfile.dtk
+  schedule:
+    - cron: "17 6 1,15 * *"
+  workflow_dispatch:
+    inputs:
+      rpm_run_id:
+        description: Successful RPM Build Reproduction run ID for base composes
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release-matrix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.releases.outputs.matrix }}
+    steps:
+      - name: Find the latest stable OKD release payloads
+        id: releases
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const versions = ["4.20", "4.21", "4.22"];
+            const releases = [];
+            const releasePattern = /^4\.(20|21|22)\.\d+-okd-scos\.\d+$/;
+            const imagePattern =
+              /^quay\.io\/okd\/scos-release@sha256:[0-9a-f]{64}$/;
+
+            for (let page = 1; page <= 20; page++) {
+              const { data } = await github.rest.repos.listReleases({
+                owner: "okd-project",
+                repo: "okd",
+                per_page: 100,
+                page,
+              });
+
+              for (const release of data) {
+                if (release.draft || release.prerelease) continue;
+                if (!releasePattern.test(release.tag_name)) continue;
+                const image = release.body?.match(/Pull From:\s*(\S+)/)?.[1];
+                if (!imagePattern.test(image ?? "")) continue;
+
+                releases.push({
+                  version: release.tag_name.match(
+                    /^(4\.(?:20|21|22))\./
+                  )[1],
+                  tag: release.tag_name,
+                  image,
+                  published_at: release.published_at,
+                });
+              }
+
+              if (versions.every((version) =>
+                releases.some((release) => release.version === version)
+              )) break;
+              if (data.length < 100) break;
+            }
+
+            const latestReleases = Object.fromEntries(
+              versions.map((version) => {
+                const matching = releases
+                  .filter((release) => release.version === version)
+                  .sort((a, b) =>
+                    (a.published_at ?? "").localeCompare(b.published_at ?? "")
+                  );
+                return [version, matching.at(-1)];
+              })
+            );
+            if (versions.some((version) => !latestReleases[version])) {
+              throw new Error(
+                "Could not find stable release payloads for " +
+                  versions.join(", ") +
+                  "."
+              );
+            }
+
+            const matrix = [];
+            for (const version of versions) {
+              const release = latestReleases[version];
+              const { data: commit } = await github.rest.repos.getCommit({
+                owner: "okd-project",
+                repo: "okd",
+                ref: release.tag,
+              });
+
+              for (const base of ["c9s", "c10s"]) {
+                matrix.push({
+                  version,
+                  release_tag: release.tag,
+                  release_image: release.image,
+                  release_commit: commit.sha,
+                  base,
+                  os_major: base.match(/^c(\d+)s$/)[1],
+                  repo_version:
+                    base === "c10s"
+                      ? "10.0"
+                      : version === "4.20"
+                        ? "9.6"
+                        : version === "4.21"
+                          ? "9.7"
+                          : "9.8",
+                });
+              }
+            }
+            core.setOutput("matrix", JSON.stringify(matrix));
+
+  build:
+    needs: release-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.release-matrix.outputs.matrix) }}
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-okd-stream-coreos.yml
+    with:
+      version: ${{ matrix.version }}
+      release_tag: ${{ matrix.release_tag }}
+      release_image: ${{ matrix.release_image }}
+      release_commit: ${{ matrix.release_commit }}
+      base_stream: ${{ matrix.base }}
+      os_major: ${{ matrix.os_major }}
+      repo_version: ${{ matrix.repo_version }}
+      rpm_run_id: ${{ inputs.rpm_run_id }}
+    secrets: inherit

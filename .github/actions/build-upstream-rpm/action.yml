@@ -34,6 +34,7 @@ runs:
         COMPONENT: ${{ inputs.component }}
         SPEC: ${{ inputs.spec-file }}
         OS_VERSION: ${{ inputs.os-version }}
+        GOTOOLCHAIN: auto
       run: |
         set -euo pipefail
         source_dir="$GITHUB_WORKSPACE/source/$COMPONENT"

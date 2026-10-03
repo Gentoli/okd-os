@@ -180,6 +180,7 @@ jobs:
         run: |
           set -euo pipefail
           image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/scos-base"
+          revision_label=org.opencontainers.image.revision
           skopeo copy \
             "oci-archive:${{ steps.oci-image.outputs.path }}" \
             "containers-storage:localhost/scos-base-source:${STREAM}"
@@ -190,8 +191,7 @@ jobs:
           podman commit \
             --change "LABEL org.opencontainers.image.source=${config_source}" \
             --change "LABEL org.opencontainers.image.version=${STREAM}" \
-            --change \
-              "LABEL org.opencontainers.image.revision=${COREOS_CONFIG_REVISION}" \
+            --change "LABEL ${revision_label}=${COREOS_CONFIG_REVISION}" \
             --change "LABEL io.okd.source.workflow.revision=${GITHUB_SHA}" \
             "$container_id" "${image_ref}:${STREAM}"
           podman rm "$container_id"

@@ -1,162 +1,77 @@
 name: Build and Publish OKD Stream CoreOS
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - .github/workflows/build-okd-stream-coreos.yml
-      - Dockerfile
-      - Dockerfile.dtk
-  schedule:
-    - cron: "17 6 1,15 * *"
-  workflow_dispatch:
+  workflow_call:
     inputs:
+      version:
+        description: OKD release version
+        required: true
+        type: string
+      release_tag:
+        description: Stable OKD release tag
+        required: true
+        type: string
+      release_image:
+        description: Digest-pinned OKD release payload
+        required: true
+        type: string
+      release_commit:
+        description: Source commit for the OKD release
+        required: true
+        type: string
+      base_stream:
+        description: CentOS Stream base identifier
+        required: true
+        type: string
+      os_major:
+        description: CentOS Stream major version
+        required: true
+        type: string
+      repo_version:
+        description: OpenShift package repository version
+        required: true
+        type: string
       rpm_run_id:
         description: Successful RPM Build Reproduction run ID for base composes
         required: false
         type: string
 
 permissions:
+  actions: read
   contents: read
+  packages: write
 
 concurrency:
-  group: build-okd-stream-coreos-${{ github.ref }}
+  group: ${{ inputs.version }}-${{ inputs.base_stream }}
   cancel-in-progress: false
 
 jobs:
-  release-matrix:
+  resolve-source:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     outputs:
-      matrix: ${{ steps.releases.outputs.matrix }}
-    steps:
-      - name: Find the latest stable OKD release payloads
-        id: releases
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const versions = ["4.20", "4.21", "4.22"];
-            const releases = [];
-            const releasePattern = /^4\.(20|21|22)\.\d+-okd-scos\.\d+$/;
-            const imagePattern =
-              /^quay\.io\/okd\/scos-release@sha256:[0-9a-f]{64}$/;
-
-            for (let page = 1; page <= 20; page++) {
-              const { data } = await github.rest.repos.listReleases({
-                owner: "okd-project",
-                repo: "okd",
-                per_page: 100,
-                page,
-              });
-
-              for (const release of data) {
-                if (release.draft || release.prerelease) continue;
-                if (!releasePattern.test(release.tag_name)) continue;
-                const image = release.body?.match(/Pull From:\s*(\S+)/)?.[1];
-                if (!imagePattern.test(image ?? "")) continue;
-
-                releases.push({
-                  version: release.tag_name.match(/^(4\.(?:20|21|22))\./)[1],
-                  tag: release.tag_name,
-                  image,
-                  published_at: release.published_at,
-                });
-              }
-
-              if (versions.every((version) =>
-                releases.some((release) => release.version === version)
-              )) break;
-              if (data.length < 100) break;
-            }
-
-            const latestReleases = Object.fromEntries(
-              versions.map((version) => {
-                const matching = releases
-                  .filter((release) => release.version === version)
-                  .sort((a, b) =>
-                    (a.published_at ?? "").localeCompare(b.published_at ?? "")
-                  );
-                return [version, matching.at(-1)];
-              })
-            );
-            if (versions.some((version) => !latestReleases[version])) {
-              throw new Error(
-                "Could not find stable release payloads for 4.20, 4.21, and 4.22."
-              );
-            }
-
-            const matrix = [];
-            for (const version of versions) {
-              const release = latestReleases[version];
-              const { data: commit } = await github.rest.repos.getCommit({
-                owner: "okd-project",
-                repo: "okd",
-                ref: release.tag,
-              });
-
-              for (const base of ["c9s", "c10s"]) {
-                matrix.push({
-                  version,
-                  release_tag: release.tag,
-                  release_image: release.image,
-                  release_commit: commit.sha,
-                  base,
-                  os_major: base.match(/^c(\d+)s$/)[1],
-                  repo_version:
-                    base === "c10s"
-                      ? "10.0"
-                      : version === "4.20"
-                        ? "9.6"
-                        : version === "4.21"
-                          ? "9.7"
-                          : "9.8",
-                });
-              }
-            }
-            core.setOutput("matrix", JSON.stringify(matrix));
-
-  build-and-publish:
-    needs: release-matrix
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-      packages: write
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.release-matrix.outputs.matrix) }}
+      stream_image: ${{ steps.images.outputs.stream_image }}
+      stream_info: ${{ steps.images.outputs.stream_info }}
+      dtk_image: ${{ steps.images.outputs.dtk_image }}
+      dtk_info: ${{ steps.images.outputs.dtk_info }}
+      compose: ${{ steps.images.outputs.compose }}
+      skip_build: ${{ steps.images.outputs.skip_build }}
     env:
-      RPM_RUN_ID: ${{ inputs.rpm_run_id }}
-      OKD_VERSION: ${{ matrix.version }}
-      RELEASE_TAG: ${{ matrix.release_tag }}
-      RELEASE_IMAGE: ${{ matrix.release_image }}
-      RELEASE_COMMIT: ${{ matrix.release_commit }}
-      BASE_STREAM: ${{ matrix.base }}
-      OS_MAJOR: ${{ matrix.os_major }}
-      REPO_VERSION: ${{ matrix.repo_version }}
+      OKD_VERSION: ${{ inputs.version }}
+      RELEASE_IMAGE: ${{ inputs.release_image }}
+      BASE_STREAM: ${{ inputs.base_stream }}
     steps:
-      - name: Checkout workflow repository
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
       - name: Install oc
         uses: redhat-actions/openshift-tools-installer@v1
         with:
           oc: "4"
 
-      - name: Install image and RPM repository tools
+      - name: Install registry inspection tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            createrepo-c podman skopeo
+          sudo apt-get install --no-install-recommends -y jq skopeo
 
       - name: Resolve release images
-        id: source-images
+        id: images
         run: |
           set -euo pipefail
           inspect_image() {
@@ -177,6 +92,19 @@ jobs:
                   $image.Labels["org.opencontainers.image.revision"]
                   // $image.Labels["io.openshift.build.commit.id"]
                   // "unknown"
+                ),
+                scos_base_digest: (
+                  $image.Labels["io.okd.source.scos-base.digest"] // "unknown"
+                ),
+                scos_base_revision: (
+                  $image.Labels["io.okd.source.scos-base.revision"] // "unknown"
+                ),
+                openshift_os_revision: (
+                  $image.Labels["io.okd.source.openshift-os.revision"]
+                  // "unknown"
+                ),
+                rpm_build_run: (
+                  $image.Labels["io.okd.source.rpm-build.run"] // "unknown"
                 )
               }'
           }
@@ -185,9 +113,10 @@ jobs:
             --image-for stream-coreos "$RELEASE_IMAGE" 2>/dev/null || true)
           dtk_image=$(oc adm release info \
             --image-for driver-toolkit "$RELEASE_IMAGE" 2>/dev/null || true)
-          compose_from_base=false
           stream_info='{}'
           dtk_info='{}'
+          compose=false
+          skip_build=false
 
           if [[ -n "$stream_image" ]]; then
             stream_info=$(inspect_image "$stream_image")
@@ -200,7 +129,13 @@ jobs:
             fi
           fi
           if [[ -z "$stream_image" ]]; then
-            compose_from_base=true
+            if [[ "$BASE_STREAM" == "c10s" ]]; then
+              echo "No matching c10s stream-coreos image;" \
+                "c10s has no base fallback."
+              skip_build=true
+            else
+              compose=true
+            fi
           fi
 
           if [[ -n "$dtk_image" ]]; then
@@ -223,11 +158,28 @@ jobs:
           echo "stream_info=$stream_info" >> "$GITHUB_OUTPUT"
           echo "dtk_image=$dtk_image" >> "$GITHUB_OUTPUT"
           echo "dtk_info=$dtk_info" >> "$GITHUB_OUTPUT"
-          echo "compose=$compose_from_base" >> "$GITHUB_OUTPUT"
+          echo "compose=$compose" >> "$GITHUB_OUTPUT"
+          echo "skip_build=$skip_build" >> "$GITHUB_OUTPUT"
 
+  compose-base-image:
+    needs: resolve-source
+    if: needs.resolve-source.outputs.compose == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    outputs:
+      image_ref: ${{ steps.compose.outputs.image_ref }}
+    env:
+      RPM_RUN_ID: ${{ inputs.rpm_run_id }}
+      OKD_VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      RELEASE_IMAGE: ${{ inputs.release_image }}
+      RELEASE_COMMIT: ${{ inputs.release_commit }}
+      BASE_STREAM: ${{ inputs.base_stream }}
+      OS_MAJOR: ${{ inputs.os_major }}
+      REPO_VERSION: ${{ inputs.repo_version }}
+    steps:
       - name: Validate RPM artifact run ID
         id: rpm-run
-        if: steps.source-images.outputs.compose == 'true'
         run: |
           set -euo pipefail
           if [[ ! "$RPM_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
@@ -238,16 +190,20 @@ jobs:
           echo "run_id=$RPM_RUN_ID" >> "$GITHUB_OUTPUT"
 
       - name: Checkout matching openshift/os source
-        if: steps.source-images.outputs.compose == 'true'
         uses: actions/checkout@v4
         with:
           repository: openshift/os
-          ref: release-${{ matrix.version }}
+          ref: release-${{ inputs.version }}
           path: openshift-os
           persist-credentials: false
 
+      - name: Install image and RPM repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            createrepo-c podman skopeo
+
       - name: Allow provider RPM package names in the local repo
-        if: steps.source-images.outputs.compose == 'true'
         working-directory: openshift-os
         run: |
           set -euo pipefail
@@ -263,10 +219,9 @@ jobs:
           grep -F "includepkgs=" "$script"
 
       - name: Download matching RPM artifacts
-        if: steps.source-images.outputs.compose == 'true'
         uses: actions/download-artifact@v4.1.3
         with:
-          pattern: "*-rpms-okd${{ matrix.version }}-el${{ matrix.os_major }}"
+          pattern: "*-rpms-okd${{ inputs.version }}-el${{ inputs.os_major }}"
           path: ${{ runner.temp }}/okd-rpms
           merge-multiple: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -274,9 +229,8 @@ jobs:
           run-id: ${{ steps.rpm-run.outputs.run_id }}
 
       - name: Prepare the local RPM repository
-        if: steps.source-images.outputs.compose == 'true'
         env:
-          RPM_REPO_VERSION: ${{ matrix.repo_version }}
+          RPM_REPO_VERSION: ${{ inputs.repo_version }}
         run: |
           set -euo pipefail
           rpm_dir="$RUNNER_TEMP/okd-rpms"
@@ -311,7 +265,6 @@ jobs:
           EOF
 
       - name: Log in to GHCR
-        if: steps.source-images.outputs.compose == 'true'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -319,9 +272,8 @@ jobs:
           printf '%s' "$GHCR_TOKEN" |
             podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
-      - name: Compose the machine image from the latest SCOS base
+      - name: Compose and publish machine image
         id: compose
-        if: steps.source-images.outputs.compose == 'true'
         env:
           IMAGE_OWNER: ${{ github.repository_owner }}
         run: |
@@ -329,17 +281,25 @@ jobs:
           BASE_IMAGE="ghcr.io/${IMAGE_OWNER,,}/scos-base:${BASE_STREAM}"
           base_info=$(skopeo inspect "docker://${BASE_IMAGE}")
           base_digest=$(jq -r '.Digest' <<< "$base_info")
+          base_version=$(jq -r \
+            '.Labels["org.opencontainers.image.version"] // "unknown"' \
+            <<< "$base_info")
           base_revision=$(jq -r \
             '.Labels["org.opencontainers.image.revision"] // "unknown"' \
             <<< "$base_info")
           os_revision=$(git -C "$GITHUB_WORKSPACE/openshift-os" rev-parse HEAD)
-          image_ref="localhost/stream-coreos:${OKD_VERSION}-${BASE_STREAM}"
+          image_ref="ghcr.io/${IMAGE_OWNER,,}/stream-coreos:compose-${OKD_VERSION}-${BASE_STREAM}-${GITHUB_RUN_ID}"
           podman build \
             --from "$BASE_IMAGE" \
             --label "org.opencontainers.image.version=${OKD_VERSION}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --label "org.opencontainers.image.base.name=${BASE_IMAGE}" \
             --label "org.opencontainers.image.base.digest=${base_digest}" \
+            --label "io.okd.source.release.tag=${RELEASE_TAG}" \
+            --label "io.okd.source.release.payload=${RELEASE_IMAGE}" \
+            --label "io.okd.source.release.revision=${RELEASE_COMMIT}" \
+            --label "io.okd.source.scos-base.version=${base_version}" \
+            --label "io.okd.source.scos-base.digest=${base_digest}" \
             --label "io.okd.source.scos-base.revision=${base_revision}" \
             --label "io.okd.source.openshift-os.revision=${os_revision}" \
             --label "io.okd.source.rpm-build.run=${RPM_RUN_ID}" \
@@ -348,14 +308,55 @@ jobs:
             --security-opt label=disable \
             --tag "$image_ref" \
             "$GITHUB_WORKSPACE/openshift-os"
+          podman push "$image_ref" "docker://${image_ref}"
           echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+
+  publish-overlays:
+    needs:
+      - resolve-source
+      - compose-base-image
+    if: >-
+      ${{
+        always() &&
+        needs.resolve-source.result == 'success' &&
+        needs.resolve-source.outputs.skip_build != 'true' &&
+        (
+          needs.compose-base-image.result == 'success' ||
+          needs.compose-base-image.result == 'skipped'
+        )
+      }}
+    runs-on: ubuntu-latest
+    env:
+      OKD_VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      RELEASE_IMAGE: ${{ inputs.release_image }}
+      RELEASE_COMMIT: ${{ inputs.release_commit }}
+      BASE_STREAM: ${{ inputs.base_stream }}
+      OS_MAJOR: ${{ inputs.os_major }}
+      STREAM_IMAGE: ${{ needs.resolve-source.outputs.stream_image }}
+      DTK_IMAGE: ${{ needs.resolve-source.outputs.dtk_image }}
+      COMPOSED_IMAGE: ${{ needs.compose-base-image.outputs.image_ref }}
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install image tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y jq podman skopeo
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Select overlay source images
         id: overlay-inputs
-        env:
-          STREAM_IMAGE: ${{ steps.source-images.outputs.stream_image }}
-          DTK_IMAGE: ${{ steps.source-images.outputs.dtk_image }}
-          COMPOSED_IMAGE: ${{ steps.compose.outputs.image_ref }}
         run: |
           set -euo pipefail
           stream_image="${STREAM_IMAGE:-$COMPOSED_IMAGE}"
@@ -391,8 +392,8 @@ jobs:
       - name: Resolve image provenance
         id: provenance
         env:
-          STREAM_INFO: ${{ steps.source-images.outputs.stream_info }}
-          DTK_INFO: ${{ steps.source-images.outputs.dtk_info }}
+          STREAM_INFO: ${{ needs.resolve-source.outputs.stream_info }}
+          DTK_INFO: ${{ needs.resolve-source.outputs.dtk_info }}
           STREAM_IMAGE_REF: ${{ steps.overlay-inputs.outputs.stream_image }}
           DTK_IMAGE_REF: ${{ steps.overlay-inputs.outputs.dtk_image }}
         run: |
@@ -402,20 +403,43 @@ jobs:
             local source_info=$2
             local image_ref=$3
             local digest version revision
+            local scos_base_version scos_base_digest scos_base_revision
+            local openshift_os_revision rpm_build_run
 
             if [[ "$source_info" == '{}' ]]; then
-              source_info=$(skopeo inspect "containers-storage:${image_ref}")
+              source_info=$(skopeo inspect "docker://${image_ref}")
               digest=$(jq -r '.Digest // "unknown"' <<< "$source_info")
-              version=$(jq -r \
-                '.Labels["org.opencontainers.image.version"] // "unknown"' \
+              scos_base_version=$(jq -r \
+                '.Labels["io.okd.source.scos-base.version"] // "unknown"' \
                 <<< "$source_info")
-              revision=$(jq -r \
-                '.Labels["org.opencontainers.image.revision"] // "unknown"' \
+              scos_base_digest=$(jq -r \
+                '.Labels["io.okd.source.scos-base.digest"] // "unknown"' \
                 <<< "$source_info")
+              scos_base_revision=$(jq -r \
+                '.Labels["io.okd.source.scos-base.revision"] // "unknown"' \
+                <<< "$source_info")
+              openshift_os_revision=$(jq -r \
+                '.Labels["io.okd.source.openshift-os.revision"] // "unknown"' \
+                <<< "$source_info")
+              rpm_build_run=$(jq -r \
+                '.Labels["io.okd.source.rpm-build.run"] // "unknown"' \
+                <<< "$source_info")
+              version=$RELEASE_TAG
+              revision=$RELEASE_COMMIT
             else
               digest=$(jq -r '.digest // "unknown"' <<< "$source_info")
               version=$(jq -r '.version // "unknown"' <<< "$source_info")
               revision=$(jq -r '.revision // "unknown"' <<< "$source_info")
+              scos_base_version=$(jq -r \
+                '.scos_base_version // "unknown"' <<< "$source_info")
+              scos_base_digest=$(jq -r \
+                '.scos_base_digest // "unknown"' <<< "$source_info")
+              scos_base_revision=$(jq -r \
+                '.scos_base_revision // "unknown"' <<< "$source_info")
+              openshift_os_revision=$(jq -r \
+                '.openshift_os_revision // "unknown"' <<< "$source_info")
+              rpm_build_run=$(jq -r \
+                '.rpm_build_run // "unknown"' <<< "$source_info")
             fi
 
             [[ "$version" != "unknown" ]] || version=$RELEASE_TAG
@@ -424,6 +448,11 @@ jobs:
               echo "${prefix}_digest=$digest"
               echo "${prefix}_version=$version"
               echo "${prefix}_revision=$revision"
+              echo "${prefix}_scos_base_version=$scos_base_version"
+              echo "${prefix}_scos_base_digest=$scos_base_digest"
+              echo "${prefix}_scos_base_revision=$scos_base_revision"
+              echo "${prefix}_openshift_os_revision=$openshift_os_revision"
+              echo "${prefix}_rpm_build_run=$rpm_build_run"
             } >> "$GITHUB_OUTPUT"
           }
 
@@ -438,13 +467,21 @@ jobs:
           SOURCE_DIGEST: ${{ steps.provenance.outputs.stream_digest }}
           SOURCE_VERSION: ${{ steps.provenance.outputs.stream_version }}
           SOURCE_REVISION: ${{ steps.provenance.outputs.stream_revision }}
+          SCOS_BASE_VERSION: >-
+            ${{ steps.provenance.outputs.stream_scos_base_version }}
+          SCOS_BASE_DIGEST: >-
+            ${{ steps.provenance.outputs.stream_scos_base_digest }}
+          SCOS_BASE_REVISION: >-
+            ${{ steps.provenance.outputs.stream_scos_base_revision }}
+          OPENSHIFT_OS_REVISION: >-
+            ${{ steps.provenance.outputs.stream_openshift_os_revision }}
+          RPM_BUILD_RUN: ${{ steps.provenance.outputs.stream_rpm_build_run }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           owner=${GITHUB_REPOSITORY_OWNER,,}
           image_ref="ghcr.io/${owner}/stream-coreos"
           image_tag="${OKD_VERSION}-${BASE_STREAM}"
-
           source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           labels=(
             --label "org.opencontainers.image.source=${source_url}"
@@ -458,11 +495,15 @@ jobs:
             --label "io.okd.source.image.version=${SOURCE_VERSION}"
             --label "io.okd.source.image.revision=${SOURCE_REVISION}"
             --label "io.okd.source.image.digest=${SOURCE_DIGEST}"
+            --label "io.okd.source.scos-base.version=${SCOS_BASE_VERSION}"
+            --label "io.okd.source.scos-base.digest=${SCOS_BASE_DIGEST}"
+            --label "io.okd.source.scos-base.revision=${SCOS_BASE_REVISION}"
+            --label \
+              "io.okd.source.openshift-os.revision=${OPENSHIFT_OS_REVISION}"
+            --label "io.okd.source.rpm-build.run=${RPM_BUILD_RUN}"
             --label "io.okd.source.base.stream=${BASE_STREAM}"
             --label "io.okd.source.kernel.version=${KERNEL_VERSION}"
           )
-          printf '%s' "$GHCR_TOKEN" |
-            podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           podman build \
             --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
             --build-arg "VERSION=${KERNEL_VERSION}" \
@@ -481,13 +522,20 @@ jobs:
           SOURCE_DIGEST: ${{ steps.provenance.outputs.dtk_digest }}
           SOURCE_VERSION: ${{ steps.provenance.outputs.dtk_version }}
           SOURCE_REVISION: ${{ steps.provenance.outputs.dtk_revision }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SCOS_BASE_VERSION: >-
+            ${{ steps.provenance.outputs.dtk_scos_base_version }}
+          SCOS_BASE_DIGEST: >-
+            ${{ steps.provenance.outputs.dtk_scos_base_digest }}
+          SCOS_BASE_REVISION: >-
+            ${{ steps.provenance.outputs.dtk_scos_base_revision }}
+          OPENSHIFT_OS_REVISION: >-
+            ${{ steps.provenance.outputs.dtk_openshift_os_revision }}
+          RPM_BUILD_RUN: ${{ steps.provenance.outputs.dtk_rpm_build_run }}
         run: |
           set -euo pipefail
           owner=${GITHUB_REPOSITORY_OWNER,,}
           image_ref="ghcr.io/${owner}/driver-toolkit"
           image_tag="${OKD_VERSION}-${BASE_STREAM}"
-
           source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           labels=(
             --label "org.opencontainers.image.source=${source_url}"
@@ -501,6 +549,12 @@ jobs:
             --label "io.okd.source.image.version=${SOURCE_VERSION}"
             --label "io.okd.source.image.revision=${SOURCE_REVISION}"
             --label "io.okd.source.image.digest=${SOURCE_DIGEST}"
+            --label "io.okd.source.scos-base.version=${SCOS_BASE_VERSION}"
+            --label "io.okd.source.scos-base.digest=${SCOS_BASE_DIGEST}"
+            --label "io.okd.source.scos-base.revision=${SCOS_BASE_REVISION}"
+            --label \
+              "io.okd.source.openshift-os.revision=${OPENSHIFT_OS_REVISION}"
+            --label "io.okd.source.rpm-build.run=${RPM_BUILD_RUN}"
             --label "io.okd.source.base.stream=${BASE_STREAM}"
             --label "io.okd.source.kernel.version=${KERNEL_VERSION}"
           )

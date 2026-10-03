@@ -2,12 +2,13 @@
 
 ## Release matrix
 
-The image workflow scans stable OKD releases 4.20, 4.21, and 4.22, ignoring
-pre-releases, then builds both `c9s` and `c10s` variants. A release payload's
-matching `stream-coreos` image is reused and receives only the kernel/GCC
-overlays. If no matching image exists, the workflow composes the machine image
-from the latest `scos-base:<stream>` image and version-matched RPM artifacts.
-It publishes `stream-coreos:<version>-<stream>` and
+The scheduled/manual `scan-okd-releases.yml` workflow scans stable OKD releases
+4.20, 4.21, and 4.22, ignoring pre-releases, then calls the reusable
+`build-okd-stream-coreos.yml` workflow for each `c9s` and `c10s` variant. A
+release payload's matching `stream-coreos` image is reused and receives only
+the kernel/GCC overlays. If no matching c9s image exists, a separate job
+composes the machine image from the latest `scos-base:c9s` and matching RPM
+artifacts. It publishes `stream-coreos:<version>-<stream>` and
 `driver-toolkit:<version>-<stream>`.
 
 ## Historical 4.20 compose details
@@ -224,16 +225,20 @@ the temporary artifact-download URL or at the ZIP itself.
 
 ## Current node-image workflow
 
-The
-[`build-okd-stream-coreos.yml`](.github/workflows/build-okd-stream-coreos.yml)
-workflow scans stable releases at
+The scheduled/manual
+[`scan-okd-releases.yml`](.github/workflows/scan-okd-releases.yml) workflow
+scans stable releases at
 [okd-project/okd/releases](https://github.com/okd-project/okd/releases), ignoring
 pre-releases, then builds a 4.20/4.21/4.22 × c9s/c10s matrix. If a matching
-`stream-coreos` image is present in a release payload, the workflow uses it as
-the input and only applies the kernel/GCC overlay. Otherwise it composes the
-machine image from the latest `scos-base:<stream>` image and the matching RPM
-artifacts. The manual `rpm_run_id` input is needed only for base composes; there
-is no repository-variable fallback.
+`stream-coreos` image is present in a release payload, the reusable
+[`build-okd-stream-coreos.yml`](.github/workflows/build-okd-stream-coreos.yml)
+workflow uses it as the input and only applies the kernel/GCC overlay. It
+prepares the source-image decision and fallback compose in separate jobs, so a
+matching upstream image skips composition. If a c9s image is missing, it
+composes from the latest `scos-base:c9s` and matching RPM artifacts; a c10s
+variant without an upstream image is skipped because no c10s base is built. The
+manual `rpm_run_id` input is needed only for c9s fallback composes; there is no
+repository-variable fallback.
 
 The workflow publishes `stream-coreos:<version>-<stream>` and
 `driver-toolkit:<version>-<stream>`. Each image records its release payload,
