@@ -6,7 +6,11 @@ on:
       - .github/workflows/build-okd-stream-coreos.yml
       - .github/workflows/rpm-build.yml
       - .github/workflows/scan-okd-releases.yml
-      - .github/scripts/rpm-source-plan.py
+      - .github/actions/plan-rpm-mirrors/action.yml
+      - .github/actions/resolve-rpm-sources/action.yml
+      - .github/prompts/rpm-mirror-maintenance.md
+      - .github/workflows/plan-rpm-mirrors.yml
+      - .github/workflows/sync-rpm-mirror.yml
       - rpms/mirror-plan.json
       - Dockerfile
       - Dockerfile.dtk
@@ -18,7 +22,16 @@ permissions:
   contents: read
 
 jobs:
+  plan-rpm-mirrors:
+    permissions:
+      actions: write
+      contents: read
+    uses: ./.github/workflows/plan-rpm-mirrors.yml
+    with:
+      okd_version: ""
+
   release-matrix:
+    needs: plan-rpm-mirrors
     runs-on: ubuntu-latest
     permissions:
       contents: read

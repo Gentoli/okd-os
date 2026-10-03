@@ -5,9 +5,11 @@ on:
     branches:
       - main
     paths:
-      - .github/scripts/rpm-mirror-plan.py
+      - .github/actions/plan-rpm-mirrors/action.yml
+      - .github/actions/resolve-rpm-sources/action.yml
       - .github/workflows/plan-rpm-mirrors.yml
       - .github/workflows/sync-rpm-mirror.yml
+      - .github/prompts/rpm-mirror-maintenance.md
       - docs/module-patch.md
       - rpms/mirror-plan.json
   schedule:
@@ -21,6 +23,12 @@ on:
         options:
           - "4.20"
           - "4.22"
+  workflow_call:
+    inputs:
+      okd_version:
+        description: OKD version whose RPM mirrors should be checked
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -29,29 +37,33 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      versions: ${{ steps.check.outputs.versions }}
+      versions: ${{ steps.versions.outputs.versions }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Check upstream mirror branches
         id: check
+        uses: ./.github/actions/plan-rpm-mirrors
+        with:
+          repository: ${{ github.repository }}
+          okd-version: ${{ inputs.okd_version }}
+          plan-file: rpms/mirror-plan.json
+
+      - name: Select requested OKD versions
+        id: versions
         env:
-          GH_REPOSITORY: ${{ github.repository }}
+          MIRRORS: ${{ steps.check.outputs.mirrors }}
           OKD_VERSION: ${{ inputs.okd_version }}
         run: |
           set -euo pipefail
-          args=(
-            --plan rpms/mirror-plan.json
-            --repository "$GH_REPOSITORY"
-            --needs-sync-only
-          )
-          if [[ -n "$OKD_VERSION" ]]; then
-            args+=(--okd-version "$OKD_VERSION")
+          if [[ -n "$OKD_VERSION" ]] &&
+            [[ "$(jq 'length' <<< "$MIRRORS")" != "0" ]]; then
+            versions=$(jq -cn --arg version "$OKD_VERSION" '[$version]')
+          else
+            versions=$(jq -c '[.[].request_version] | unique' \
+              <<< "$MIRRORS")
           fi
-          mirrors=$(python3 .github/scripts/rpm-mirror-plan.py "${args[@]}")
-          versions=$(jq -c '[.[].request_version] | unique' <<< "$mirrors")
-          echo "Mirror updates required: $mirrors"
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
 
   dispatch:

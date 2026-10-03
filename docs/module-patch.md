@@ -33,18 +33,19 @@ before `%{?dist}`. The mirror workflow updates this deterministic release patch
 for every mirrored package, even when no additional functional EL
 compatibility change is needed; the RPM build only consumes the prepared spec.
 
-The read-only planner in `plan-rpm-mirrors.yml` requests only an OKD version.
-For that version it checks exact upstream branches and existing mirrors using
-Git's patch-equivalence check. It skips when direct source branches suffice or
-all mirrors are current; otherwise it dispatches one version-scoped
-`sync-rpm-mirror.yml` run. The sync workflow seeds missing branches from their
-selected upstream tips, asks Copilot CLI to replay missing commits and recreate
-the documented package patch, and publishes resulting commits with
-`pgaskin/push-signed-commits`. Copilot has repository read access and
-`copilot-requests: write`; only the publishing job has repository write access.
-The CLI uses `gpt-6-luna@max` with the long-context tier. The organization must
-allow Copilot CLI requests billed to the organization. The workflow requests
-the 1M context tier and maximum reasoning effort.
+The `plan-rpm-mirrors` composite action uses inline `actions/github-script` to
+check exact upstream branches and mirror freshness using Git's
+patch-equivalence check. The planner skips when direct source branches suffice
+or all mirrors are current; otherwise it dispatches one version-scoped
+`sync-rpm-mirror.yml` run. It is also called by `scan-okd-releases.yml` before
+release builds. The sync workflow uses a single job: a GitHub Script step
+creates mirror worktrees and metadata, Copilot CLI replays missing commits and
+recreates the documented package patch using
+`.github/prompts/rpm-mirror-maintenance.md`, and the workflow publishes commits
+with `push-signed-commits`. The job has `contents: write` and
+`copilot-requests: write`. Copilot uses `gpt-6-luna`, long context, and maximum
+reasoning effort. The organization must allow Copilot CLI requests billed to
+the organization.
 
 Updates append cherry-picked upstream changes to the mirror, retaining each
 change's patch equivalence. The branch-local `.rpm-mirror.json` records the

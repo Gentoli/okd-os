@@ -224,39 +224,11 @@ jobs:
 
       - name: Resolve sources for the RPM build targets
         id: plan
-        env:
-          GH_REPOSITORY: ${{ github.repository }}
-          RPM_TARGETS: ${{ inputs.rpm_targets }}
-        run: |
-          set -euo pipefail
-          sources='{}'
-          while IFS= read -r target; do
-            version=$(jq -r '.okd_version' <<< "$target")
-            os_version=$(jq -r '.os_version' <<< "$target")
-            pending=$(python3 .github/scripts/rpm-mirror-plan.py \
-              --plan rpms/mirror-plan.json \
-              --repository "$GH_REPOSITORY" \
-              --okd-version "$version" \
-              --needs-sync-only)
-            if [[ "$(jq -c --arg os "$os_version" \
-              '[.[] | select(.target_el == $os)] | length' \
-              <<< "$pending")" != "0" ]]; then
-              echo "RPM mirrors for OKD $version EL$os_version are stale." >&2
-              echo "Run the RPM mirror planner and retry the build." >&2
-              exit 1
-            fi
-            source=$(python3 .github/scripts/rpm-source-plan.py \
-              --plan rpms/mirror-plan.json \
-              --okd-version "$version" \
-              --os-version "$os_version" \
-              --repository "$GH_REPOSITORY")
-            key="${version}/el${os_version}"
-            sources=$(jq -c \
-              --arg key "$key" \
-              --argjson source "$source" \
-              '. + {($key): $source}' <<< "$sources")
-          done < <(jq -c '.[]' <<< "$RPM_TARGETS")
-          echo "sources=$sources" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/resolve-rpm-sources
+        with:
+          repository: ${{ github.repository }}
+          targets: ${{ inputs.rpm_targets }}
+          plan-file: rpms/mirror-plan.json
 
   build-rpms:
     needs:

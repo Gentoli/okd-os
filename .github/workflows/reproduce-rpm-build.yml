@@ -36,30 +36,11 @@ jobs:
 
       - name: Resolve package sources
         id: plan
-        env:
-          GH_REPOSITORY: ${{ github.repository }}
-          OKD_VERSION: ${{ inputs.okd_version }}
-          OS_VERSION: ${{ inputs.os_version }}
-        run: |
-          set -euo pipefail
-          pending=$(python3 .github/scripts/rpm-mirror-plan.py \
-            --plan rpms/mirror-plan.json \
-            --repository "$GH_REPOSITORY" \
-            --okd-version "$OKD_VERSION" \
-            --needs-sync-only)
-          if [[ "$(jq -c --arg os "$OS_VERSION" \
-            '[.[] | select(.target_el == $os)] | length' \
-            <<< "$pending")" != "0" ]]; then
-            echo "RPM mirrors for OKD $OKD_VERSION EL$OS_VERSION are stale." >&2
-            echo "Run the RPM mirror planner and retry the build." >&2
-            exit 1
-          fi
-          sources=$(python3 .github/scripts/rpm-source-plan.py \
-            --plan rpms/mirror-plan.json \
-            --okd-version "$OKD_VERSION" \
-            --os-version "$OS_VERSION" \
-            --repository "$GH_REPOSITORY")
-          echo "sources=$sources" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/resolve-rpm-sources
+        with:
+          repository: ${{ github.repository }}
+          targets: '[{"okd_version":"${{ inputs.okd_version }}","os_version":"${{ inputs.os_version }}"}]'
+          plan-file: rpms/mirror-plan.json
 
   build-rpms:
     needs: plan-sig-sources
@@ -70,5 +51,7 @@ jobs:
     with:
       okd_version: ${{ inputs.okd_version }}
       os_version: ${{ inputs.os_version }}
-      sig_sources: ${{ needs.plan-sig-sources.outputs.sources }}
+      sig_sources: >-
+        ${{ toJSON(fromJSON(needs.plan-sig-sources.outputs.sources)[format(
+          '{0}/el{1}', inputs.okd_version, inputs.os_version)]) }}
       run_test: ${{ inputs.run_test }}
