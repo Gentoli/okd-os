@@ -152,7 +152,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish SCOS QEMU disk to GHCR
+      - name: Publish SCOS VM image to GHCR
         env:
           STREAM: ${{ matrix.stream }}
           QEMU_IMAGE: ${{ steps.qemu-image.outputs.path }}
@@ -167,7 +167,7 @@ jobs:
           COPY scos-qemu.qcow2 /scos-qemu.qcow2
           CMD ["/scos-qemu.qcow2"]
           EOF
-          qemu_tag="${STREAM}-qemu-${GITHUB_RUN_ID}"
+          qemu_tag="${STREAM}-vm"
           podman build \
             --file "$RUNNER_TEMP/QEMU.Containerfile" \
             --tag "${image_ref}:${qemu_tag}" \
@@ -199,7 +199,3 @@ jobs:
           podman push --format oci \
             "${image_ref}:${STREAM}" \
             "docker://${image_ref}:${STREAM}"
-          podman tag "${image_ref}:${STREAM}" "${image_ref}:${STREAM}-vm"
-          podman push --format oci \
-            "${image_ref}:${STREAM}-vm" \
-            "docker://${image_ref}:${STREAM}-vm"

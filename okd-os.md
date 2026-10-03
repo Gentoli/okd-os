@@ -60,8 +60,7 @@ This confirms compatibility at the OS-family and image-role level, not
 byte-for-byte equivalence with the private upstream base. The `c9s` tag is
 mutable. The base workflow builds that variant from `coreos/rhel-coreos-config`
 and labels it with the config commit and workflow commit. It publishes the
-OCI image as `<stream>-vm` and the QEMU disk in GHCR as
-`<stream>-qemu-<run-id>`.
+OCI base as `<stream>` and the QEMU disk container as `<stream>-vm`.
 
 ## How the pinned build composes the image
 

@@ -45,21 +45,19 @@ account.
 The implemented
 [`test-okd-stream-coreos.yml`](../../.github/workflows/test-okd-stream-coreos.yml)
 workflow runs automatically after a successful main-branch image build and can
-also be dispatched manually with full image pullspecs and a SCOS base workflow
-run ID. Automatic runs use the `4.22-c9s` GHCR tag and the payload recorded in
-its source labels, plus the repository variable `OKD_SCOS_BASE_RUN_ID`; manual
-runs can override the image and release payload.
-Select a SCOS base run that produced the exact base image digest used by the
-candidate. OKD images use `<version>-<stream>` tags.
+also be dispatched manually with full image pullspecs. Automatic runs use the
+`4.22-c9s` GHCR tag and the payload recorded in its source labels; manual runs
+can override the image and release payload. OKD images use
+`<version>-<stream>` tags.
 
 ### Artifact and runner prerequisites
 
 The current
 [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml) workflow
 builds and publishes the SCOS base OCI image and its QEMU boot disk from the
-same COSA build. It publishes the VM image as `<stream>-vm` and stores the QEMU
-disk in a GHCR image tagged `<stream>-qemu-<run-id>`. The Kola workflow pulls
-that image and extracts the QEMU disk. The
+same COSA build. It publishes the OCI base as `<stream>` and the QEMU disk
+container as `<stream>-vm`. The Kola workflow pulls that image and extracts the
+QEMU disk. The
 [`build-okd-stream-coreos.yml`](../../.github/workflows/build-okd-stream-coreos.yml)
 workflow publishes the final node image to GHCR; the test pulls both candidate
 images into local OCI archives rather than passing the image build's workflow
@@ -67,8 +65,8 @@ artifact.
 
 Run the VM with QEMU/KVM on an x86_64 runner that exposes `/dev/kvm`. The
 workflow checks for that device and fails rather than silently skipping the
-boot test. The GHCR QEMU image remains available until its tag is removed. The
-existing
+boot test. The GHCR `<stream>-vm` tag is mutable and points to the most recently
+published VM image. The existing
 [`rpm-build.yml` package-install check](../../.github/workflows/rpm-build.yml)
 is useful coverage for RPM artifacts, but it does not boot the composed node
 image.
