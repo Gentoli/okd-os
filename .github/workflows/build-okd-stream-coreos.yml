@@ -481,7 +481,8 @@ jobs:
             exit 1
           fi
           echo "version=$kernel_version" >> "$GITHUB_OUTPUT"
-          echo "replace_stream_kernel=$replace_stream_kernel" >> "$GITHUB_OUTPUT"
+          printf 'replace_stream_kernel=%s\n' "$replace_stream_kernel" \
+            >> "$GITHUB_OUTPUT"
 
       - name: Resolve image provenance
         id: provenance
@@ -584,7 +585,8 @@ jobs:
         uses: actions/github-script@v9
         env:
           KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
-          REPLACE_STREAM_KERNEL: ${{ steps.kernel.outputs.replace_stream_kernel }}
+          REPLACE_STREAM_KERNEL: >-
+            ${{ steps.kernel.outputs.replace_stream_kernel }}
         with:
           script: |
             const { execFileSync } = require("node:child_process");
