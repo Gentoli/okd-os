@@ -21,10 +21,11 @@ a binary RPM hosting service.
 
 - Always build the requested SIG packages; remove `build_sig` and its gates.
 - Select sources by branch availability. Prefer the exact target upstream
-  branch; otherwise maintain a branch in this repository based on the configured
-  fallback or shared upstream branch.
-- Name release-specific mirrors `rpms/<project>-el<major>-<okd-version>` and
-  shared mirrors `rpms/<project>-el<major>`.
+  branch, then a configured native shared branch for the requested EL. Use both
+  directly. Otherwise maintain a compatibility branch in this repository based
+  on the configured fallback upstream branch.
+- Name compatibility mirrors `rpms/<project>-el<major>-<okd-version>`.
+  Native shared sources, including EL9 conmon-rs, do not need mirrors.
 - Retain upstream Git history, independent of `main`. Replay compatibility
   commits by rebase/cherry-pick. The first commit after the upstream base must be
   identified by the subject `PATCH/<upstream-base-branch>` and contain the
@@ -60,7 +61,7 @@ release matrix. Both use only `workflow_call`.
 
 | Boundary | Input | Successful result |
 | --- | --- | --- |
-| Release selection → preparation | Selected OKD/EL/package tuple and branch rules | Exact source branch or mirror request, identified by branches |
+| Release selection → preparation | Selected OKD/EL/package tuple and branch rules | Exact/native shared source branch or compatibility mirror request, identified by branches |
 | Preparation → sync | One package, upstream URL/base branch, target branch, target environment, patch identity | Mirror exists and incorporates the fetched upstream head |
 | Agent → publication | Ordered created commit IDs including the identity commit | Signed patch stack published on the target upstream history |
 | Preparation → collection | Unique per-tuple source artifact, emitted only after successful preparation | `{ "<okd>/el<major>": { "<project>": { "url": "...", "branch": "..." } } }` |
@@ -77,9 +78,10 @@ Keep the current image reuse, EL9 composition, and EL10 skip behavior.
 Add a small branch-rule configuration, provisionally `rpms/mirror-plan.json`.
 Keep the active release targets unchanged. Source rules cover `cri-o`,
 `cri-tools`, and `conmon-rs`, with exact, fallback, and shared branch patterns.
-An absent exact branch chooses the configured fallback; it does not silently
-substitute an older OKD package version. Transport/authentication failures must
-fail rather than masquerade as missing branches.
+An absent exact branch chooses a configured native shared branch directly, or
+uses the configured compatibility fallback through mirror sync. It does not
+silently substitute an older OKD package version. Transport/authentication
+failures must fail rather than masquerade as missing branches.
 
 Use the attempted configuration as a starting point, then verify its branch
 names. In particular, handle the shared EL9 `conmon-rs` source consistently
@@ -102,8 +104,8 @@ manifest may all need changes. Do not restrict maintenance to a single spec.
 
 Add `prepare-rpm-sources.yml` for one package/OKD/EL tuple. Use inline
 `actions/github-script` for deterministic branch selection. An exact upstream
-branch returns directly. Otherwise pass the chosen base branch and mirror
-identity to reusable sync.
+branch or native shared target branch returns directly. Otherwise pass the
+configured compatibility base branch and mirror identity to reusable sync.
 
 Have sync own the mirror existence/freshness decision so preparation does not
 probe the same mirror twice. For an existing mirror, fetch both histories and
@@ -121,7 +123,7 @@ than reusable workflow outputs that can overwrite one another.
 Add `sync-rpm-mirror.yml`, accepting one mirror request rather than an array
 whose length must be checked repeatedly. Grant `contents: write` and
 `copilot-requests: write`. Use branch-specific concurrency to serialize writes
-to the same mirror, including shared mirrors, while unrelated packages proceed.
+to the same mirror while unrelated packages proceed.
 Remove the attempt's global preparation/sync concurrency groups.
 
 Within that job:
@@ -222,7 +224,7 @@ Run workflow syntax/call-contract checks and focused executable cases:
 | Mirror current | Upstream ancestry succeeds; no agent invocation or publication |
 | Upstream advances | Agent replays patches; new upstream commits retain original IDs |
 | Upstream conflicts with a patch | Agent resolves/recreates it using the generic recipe |
-| Shared package used by two release targets | Same mirror branch; serialized sync; complete per-target source maps |
+| Native shared package used by two release targets | Same upstream branch used directly; no sync; complete per-target source maps |
 | Signing failure or another writer | Mirror remains unchanged by the failed publication |
 | Preparation failure | No successful source artifact or dependent build |
 | Source selection/build | No SHA-based branch planning and no RPM `Release:` comparison |

@@ -171,12 +171,43 @@ class MirrorWorkflows(unittest.TestCase):
         self.assertEqual(request["target_branch"], "rpms/cri-o-el9-4.22")
         self.assertFalse(any("sha" in key for key in request))
 
-    def test_shared_identity_is_independent_of_requested_release(self):
+    def test_native_shared_el9_source_is_direct_for_both_releases(self):
         self.env["PROJECT"] = "conmon-rs"
-        first = self.request()
-        self.env["OKD_VERSION"] = "4.20"
-        self.assertEqual(first, self.request())
-        self.assertIsNone(first["target_okd_version"])
+        for version in ("4.22", "4.20"):
+            with self.subTest(version=version):
+                self.env["OKD_VERSION"] = version
+                result = self.select()
+                self.assertNotIn("error", result)
+                self.assertEqual(result["outputs"]["mirror"], "")
+                source = json.loads(result["outputs"]["sources"])[f"{version}/el9"]["conmon-rs"]
+                self.assertEqual(source, {"url": str(self.upstream), "branch": "c9s-sig-cloud"})
+
+    def test_native_shared_el10_source_is_direct_when_exact_is_absent(self):
+        self.git("branch", "c10s-sig-cloud", cwd=self.upstream)
+        self.env.update({"PROJECT": "conmon-rs", "OS_VERSION": "10"})
+        result = self.select()["outputs"]
+        self.assertEqual(result["mirror"], "")
+        self.assertEqual(json.loads(result["sources"])["4.22/el10"]["conmon-rs"],
+                         {"url": str(self.upstream), "branch": "c10s-sig-cloud"})
+
+    def test_exact_conmon_source_precedes_native_shared_branch(self):
+        self.git("branch", "c10s-sig-cloud", cwd=self.upstream)
+        self.git("branch", "cloud10s-okd-4.22-el10s", cwd=self.upstream)
+        self.env.update({"PROJECT": "conmon-rs", "OS_VERSION": "10"})
+        result = self.select()["outputs"]
+        self.assertEqual(result["mirror"], "")
+        self.assertEqual(json.loads(result["sources"])["4.22/el10"]["conmon-rs"]["branch"],
+                         "cloud10s-okd-4.22-el10s")
+
+    def test_missing_or_unreachable_shared_source_fails_without_mirror_request(self):
+        self.env["PROJECT"] = "conmon-rs"
+        self.git("branch", "-D", "c9s-sig-cloud", cwd=self.upstream)
+        result = self.select()
+        self.assertIn("Missing upstream source branch: c9s-sig-cloud", result["error"])
+        self.assertEqual(result["outputs"], {})
+        result = self.run_script(script("prepare-rpm-sources.yml", "select", "source"), fail_remote=True)
+        self.assertIn("network unavailable", result["error"])
+        self.assertEqual(result["outputs"], {})
 
     def test_missing_fallback_and_transport_failure_fail_selection(self):
         self.env["OKD_VERSION"] = "4.23"
@@ -292,7 +323,7 @@ class MirrorWorkflows(unittest.TestCase):
         supplied = {
             "cri-o": {"url": "https://mirror.example/cri-o.git", "branch": "rpms/cri-o-el9-4.22"},
             "cri-tools": {"url": "https://upstream.example/cri-tools.git", "branch": "c10s-sig-cloud-okd-4.22"},
-            "conmon-rs": {"url": "https://mirror.example/conmon-rs.git", "branch": "rpms/conmon-rs-el9"},
+            "conmon-rs": {"url": "https://upstream.example/conmon-rs.git", "branch": "c9s-sig-cloud"},
         }
         targets = [{"version": version, "os_major": el, "run_test": False, "release_image": "selected-image"}
                    for version, el in (("4.22", "9"), ("4.22", "10"), ("4.20", "9"))]
