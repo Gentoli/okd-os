@@ -239,6 +239,13 @@ the matching RPMs in the same workflow run and composes from the latest
 c10s base is built. The other release/base matrix entries remain commented out
 while testing.
 
+For custom-composed images other than 4.22/EL9, the stream overlay preserves
+the kernel already present in the composed image instead of running
+`rpm-ostree override replace` against the same base package versions. The
+driver-toolkit overlay uses that image's installed `kernel-core` version so its
+kernel development packages stay in sync. The 4.22/EL9 overlay behavior is
+unchanged.
+
 The workflow publishes `stream-coreos:<version>-<stream>` and
 `driver-toolkit:<version>-<stream>`. Each image records its release payload,
 source image version/digest/revision, and workflow revision in OCI labels. The

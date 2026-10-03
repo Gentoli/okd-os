@@ -446,21 +446,42 @@ jobs:
         id: kernel
         run: |
           set -euo pipefail
-          kernel_version=$(
-            podman run --rm --pull=always \
-              "quay.io/centos/centos:stream${OS_MAJOR}" \
-              bash -ec '
-                dnf install -y dnf-plugins-core >/dev/null 2>&1
-                dnf repoquery --latest-limit=1 \
-                  --qf "%{VERSION}-%{RELEASE}" kernel-core
-              '
-          )
+          use_composed_kernel=false
+          replace_stream_kernel=true
+          if [[ -n "$COMPOSED_IMAGE" ]]; then
+            if [[ "$OKD_VERSION" == "4.22" && "$OS_MAJOR" == "9" ]]; then
+              echo "Preserving the existing 4.22/EL9 kernel overlay behavior."
+            else
+              use_composed_kernel=true
+              replace_stream_kernel=false
+            fi
+          fi
+
+          if [[ "$use_composed_kernel" == true ]]; then
+            kernel_version=$(
+              podman run --rm \
+                --entrypoint /usr/bin/rpm \
+                "$COMPOSED_IMAGE" \
+                -q --qf '%{VERSION}-%{RELEASE}\n' kernel-core
+            )
+          else
+            kernel_version=$(
+              podman run --rm --pull=always \
+                "quay.io/centos/centos:stream${OS_MAJOR}" \
+                bash -ec '
+                  dnf install -y dnf-plugins-core >/dev/null 2>&1
+                  dnf repoquery --latest-limit=1 \
+                    --qf "%{VERSION}-%{RELEASE}" kernel-core
+                '
+            )
+          fi
           kernel_pattern="^[0-9][A-Za-z0-9._+-]*\\.el${OS_MAJOR}$"
           if [[ ! "$kernel_version" =~ $kernel_pattern ]]; then
-            echo "Could not resolve a valid EL${OS_MAJOR} kernel version." >&2
+            echo "Could not resolve one valid EL${OS_MAJOR} kernel version." >&2
             exit 1
           fi
           echo "version=$kernel_version" >> "$GITHUB_OUTPUT"
+          echo "replace_stream_kernel=$replace_stream_kernel" >> "$GITHUB_OUTPUT"
 
       - name: Resolve image provenance
         id: provenance
@@ -563,6 +584,7 @@ jobs:
         uses: actions/github-script@v9
         env:
           KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+          REPLACE_STREAM_KERNEL: ${{ steps.kernel.outputs.replace_stream_kernel }}
         with:
           script: |
             const { execFileSync } = require("node:child_process");
@@ -628,6 +650,12 @@ jobs:
                 "--build-arg",
                 `STREAM_MAJOR=${process.env.OS_MAJOR}`,
               ];
+              if (image.name === "stream-coreos") {
+                args.push(
+                  "--build-arg",
+                  `REPLACE_KERNEL=${process.env.REPLACE_STREAM_KERNEL}`
+                );
+              }
               for (const [key, value] of Object.entries(labels)) {
                 args.push("--label", `${key}=${value ?? "unknown"}`);
               }
