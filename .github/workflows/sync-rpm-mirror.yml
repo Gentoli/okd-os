@@ -23,7 +23,6 @@ jobs:
     outputs:
       plan: ${{ steps.branches.outputs.plan }}
       target_branch: ${{ steps.branches.outputs.target_branch }}
-      base_sha: ${{ steps.branches.outputs.base_sha }}
     permissions:
       contents: write
     steps:
@@ -113,7 +112,6 @@ jobs:
             }
             core.setOutput("plan", JSON.stringify(prepared));
             core.setOutput("target_branch", prepared[0].target_branch);
-            core.setOutput("base_sha", prepared[0].base_sha);
 
   agent:
     needs: prepare
@@ -122,6 +120,7 @@ jobs:
     outputs:
       commit_oids: ${{ steps.agent.outputs.commit_oids }}
       head_oid: ${{ steps.agent.outputs.head_oid }}
+      revision: ${{ steps.agent.outputs.revision }}
     permissions:
       contents: read
       copilot-requests: write
@@ -277,9 +276,12 @@ jobs:
                 env: process.env,
               });
               process.stdout.write(output);
-              const match = output.match(
-                /^COMMIT_OIDS:\s+([0-9a-f]{40}(?:\s+[0-9a-f]{40})*)\s*$/m,
+              const commitListPattern = new RegExp(
+                "^COMMIT_OIDS:[ \\t]+([0-9a-f]{40}" +
+                  "(?:[ \\t]+[0-9a-f]{40})*)[ \\t]*$",
+                "m",
               );
+              const match = output.match(commitListPattern);
               if (!match) {
                 throw new Error(
                   "Copilot did not print the required COMMIT_OIDS line.",
@@ -310,6 +312,7 @@ jobs:
               git(["bundle", "create", bundlePath, bundleRef]);
               core.setOutput("commit_oids", commitOids.join(" "));
               core.setOutput("head_oid", headOid);
+              core.setOutput("revision", `${mirror.base_sha}..${headOid}`);
               core.info(`Agent-created commit IDs: ${commitOids.join(" ")}`);
             }
 
@@ -356,5 +359,5 @@ jobs:
           path: .
           repository: ${{ github.repository }}
           branch: ${{ needs.prepare.outputs.target_branch }}
-          revision: ${{ needs.prepare.outputs.base_sha }}..${{ needs.agent.outputs.head_oid }}
+          revision: ${{ needs.agent.outputs.revision }}
           github-token: ${{ github.token }}
