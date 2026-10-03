@@ -87,7 +87,7 @@ jobs:
           printf '%s' "$GHCR_TOKEN" |
             skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
-      - name: Select image references and SCOS base run
+      - name: Select image references
         id: test-inputs
         env:
           INPUT_OKD_IMAGE_REF: ${{ inputs.oci_image_ref }}
@@ -253,7 +253,7 @@ jobs:
             sha256sum "$archive"
           done
 
-      - name: Pull SCOS QEMU base image
+      - name: Pull SCOS QEMU VM image
         env:
           IMAGE_OWNER: ${{ github.repository_owner }}
         run: |

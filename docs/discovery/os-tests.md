@@ -65,8 +65,8 @@ artifact.
 
 Run the VM with QEMU/KVM on an x86_64 runner that exposes `/dev/kvm`. The
 workflow checks for that device and fails rather than silently skipping the
-boot test. The GHCR QEMU image remains available until its tag is removed. The
-existing
+boot test. The GHCR `<stream>-vm` tag is mutable and points to the most recently
+published VM image. The existing
 [`rpm-build.yml` package-install check](../../.github/workflows/rpm-build.yml)
 is useful coverage for RPM artifacts, but it does not boot the composed node
 image.
