@@ -51,147 +51,58 @@ jobs:
       - name: Checkout Workflow Repository
         uses: actions/checkout@v4
 
-      - name: Checkout Kubernetes
-        uses: actions/checkout@v4
-        with:
-          repository: openshift/kubernetes
-          ref: release-${{ matrix.okd_version }}
-          fetch-depth: 1
-          path: source/kubernetes
-
-      - name: Checkout OpenShift CLI
-        uses: actions/checkout@v4
-        with:
-          repository: openshift/oc
-          ref: release-${{ matrix.okd_version }}
-          fetch-depth: 1
-          path: source/oc
-
-      - name: Checkout ECR credential provider
-        uses: actions/checkout@v4
-        with:
-          repository: openshift/cloud-provider-aws
-          ref: release-${{ matrix.okd_version }}
-          fetch-depth: 1
-          path: source/ecr-credential-provider
-
-      - name: Checkout ACR credential provider
-        uses: actions/checkout@v4
-        with:
-          repository: openshift/cloud-provider-azure
-          ref: release-${{ matrix.okd_version }}
-          fetch-depth: 1
-          path: source/acr-credential-provider
-
-      - name: Checkout GCR credential provider
-        uses: actions/checkout@v4
-        with:
-          repository: openshift/cloud-provider-gcp
-          ref: release-${{ matrix.okd_version }}
-          fetch-depth: 1
-          path: source/gcr-credential-provider
-
-      - name: Build RPMs
+      - name: Install Go version information generator
+        env:
+          GOTOOLCHAIN: auto
         run: |
-          set -euo pipefail
-          export GOTOOLCHAIN=auto
-
           go install \
             github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
-          export PATH=$PATH:$(go env GOPATH)/bin
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-          for entry in \
-            "kubernetes|openshift.spec" \
-            "oc|oc.spec" \
-            "ecr-credential-provider|ecr-credential-provider.spec" \
-            "acr-credential-provider|acr-credential-provider.spec" \
-            "gcr-credential-provider|gcr-credential-provider.spec"; do
-            IFS='|' read -r component spec <<< "$entry"
-            source_dir="$GITHUB_WORKSPACE/source/$component"
-            cd "$source_dir"
-            echo "Building $component on CentOS Stream ${{ matrix.os_version }}"
+      - name: Build Kubernetes RPM
+        uses: ./.github/actions/build-upstream-rpm
+        with:
+          component: kubernetes
+          repository: openshift/kubernetes
+          spec-file: openshift.spec
+          okd-version: ${{ matrix.okd_version }}
+          os-version: ${{ matrix.os_version }}
 
-            git config --global --add safe.directory "$source_dir"
-            COMMIT=$(git rev-parse --short HEAD)
-            VERSION_RAW=$(git describe --tags --abbrev=0 2>/dev/null || true)
-            VERSION_RAW="${VERSION_RAW#v}"
-            if [ "$component" == "kubernetes" ]; then
-              KUBERNETES_VERSION=$(
-                grep -oE \
-                  'kubernetes=1\.[0-9]+\.[0-9]+(-rc\.[0-9])?' \
-                  openshift-hack/images/hyperkube/Dockerfile.rhel |
-                  head -n 1 | cut -d= -f2 || true
-              )
-              VERSION_RAW="${KUBERNETES_VERSION:-$VERSION_RAW}"
-            fi
-            VERSION_RAW="${VERSION_RAW:-0.0.1}"
-            if [ ! -f "$spec" ]; then
-              echo "A valid RPM spec_file is required for $component." >&2
-              exit 1
-            fi
+      - name: Build OpenShift CLI RPM
+        uses: ./.github/actions/build-upstream-rpm
+        with:
+          component: oc
+          repository: openshift/oc
+          spec-file: oc.spec
+          okd-version: ${{ matrix.okd_version }}
+          os-version: ${{ matrix.os_version }}
 
-            VERSION="v${VERSION_RAW}"
-            export OS_GIT_VERSION="${VERSION}+${COMMIT}"
-            export OS_GIT_COMMIT="$COMMIT"
-            export OS_GIT_MAJOR
-            OS_GIT_MAJOR=$(cut -d. -f1 <<< "$VERSION_RAW")
-            export OS_GIT_MINOR
-            OS_GIT_MINOR=$(cut -d. -f2 <<< "$VERSION_RAW")
-            export OS_GIT_PATCH
-            OS_GIT_PATCH=$(cut -d. -f3 <<< "$VERSION_RAW")
-            export OS_GIT_TREE_STATE=dirty
+      - name: Build ECR credential provider RPM
+        uses: ./.github/actions/build-upstream-rpm
+        with:
+          component: ecr-credential-provider
+          repository: openshift/cloud-provider-aws
+          spec-file: ecr-credential-provider.spec
+          okd-version: ${{ matrix.okd_version }}
+          os-version: ${{ matrix.os_version }}
 
-            if [ "$spec" == "oc.spec" ]; then
-              sed -i '/BuildRequires:.*goversioninfo/d' "$spec"
-            fi
-            dnf builddep -y "$spec"
+      - name: Build ACR credential provider RPM
+        uses: ./.github/actions/build-upstream-rpm
+        with:
+          component: acr-credential-provider
+          repository: openshift/cloud-provider-azure
+          spec-file: acr-credential-provider.spec
+          okd-version: ${{ matrix.okd_version }}
+          os-version: ${{ matrix.os_version }}
 
-            VERSION_SPEC=$(rpmspec -q --qf "%{version}\n" "$spec" | head -n 1)
-            if [ "$component" == "kubernetes" ]; then
-              VERSION_SPEC="$VERSION_RAW"
-            fi
-            NAME=$(
-              rpmspec --define "version $VERSION_SPEC" \
-                -q --qf "%{name}\n" "$spec" | head -n 1
-            )
-            VERSION_SPEC=$(
-              rpmspec --define "version $VERSION_SPEC" \
-                -q --qf "%{version}\n" "$spec" | head -n 1
-            )
-            SOURCE0=$(
-              rpmspec --define "version $VERSION_SPEC" -P "$spec" |
-                sed -n 's/^Source0:[[:space:]]*//p' |
-                head -n 1
-            )
-            SOURCE_FILE="${SOURCE0##*/}"
-            if [ -z "$SOURCE_FILE" ] || [ "$SOURCE_FILE" == "(none)" ]; then
-              echo "Unable to determine source archive name from $spec." >&2
-              exit 1
-            fi
-            mkdir -p _rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-            tar -czf "_rpmbuild/SOURCES/${SOURCE_FILE}" \
-              --exclude='./.git' \
-              --exclude='./_output' \
-              --exclude='./_rpmbuild' \
-              --transform="s|^|$NAME-$VERSION_SPEC/|rSH" ./
-            rpmbuild_args=(
-              -ba "$spec"
-              --define "_topdir $PWD/_rpmbuild"
-              --define "version $VERSION_SPEC"
-              --define "release 1"
-              --define "commit $COMMIT"
-              --define "os_git_vars \
-                OS_GIT_VERSION='$OS_GIT_VERSION' \
-                OS_GIT_COMMIT='$OS_GIT_COMMIT' \
-                OS_GIT_MAJOR='$OS_GIT_MAJOR' \
-                OS_GIT_MINOR='$OS_GIT_MINOR' \
-                OS_GIT_TREE_STATE='$OS_GIT_TREE_STATE'"
-            )
-            if [[ "$component" == *credential-provider ]]; then
-              rpmbuild_args+=(--define "build_ldflags %{nil}")
-            fi
-            rpmbuild "${rpmbuild_args[@]}"
-          done
+      - name: Build GCR credential provider RPM
+        uses: ./.github/actions/build-upstream-rpm
+        with:
+          component: gcr-credential-provider
+          repository: openshift/cloud-provider-gcp
+          spec-file: gcr-credential-provider.spec
+          okd-version: ${{ matrix.okd_version }}
+          os-version: ${{ matrix.os_version }}
 
       - name: Archive RPM Artifacts
         uses: actions/upload-artifact@v4

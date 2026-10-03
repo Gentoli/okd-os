@@ -146,7 +146,8 @@ does not claim to be a clean upstream build.
 - The corresponding compatibility patch is
   [`0001-drop-unresolvable-fwupd-plugin.patch`](../../os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch).
   [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml) applies
-  it when applicable and builds the `c9s` variant with COSA.
+  every patch under the selected stream's `patches` directory and builds the
+  `c9s` variant with COSA.
   Pushes run on `main` when the workflow or base files change. Workflow
   dispatch accepts an upstream config ref (default `HEAD`) and publishes
   `scos-base:c9s` and `scos-base:c9s-vm`. The QEMU disk is published in GHCR

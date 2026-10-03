@@ -1,0 +1,122 @@
+name: Build Upstream RPM
+description: Check out and build one upstream OKD RPM
+inputs:
+  component:
+    description: Component name used for its source directory
+    required: true
+  repository:
+    description: GitHub repository containing the component source
+    required: true
+  spec-file:
+    description: RPM spec file relative to the component source directory
+    required: true
+  okd-version:
+    description: OKD release version to build
+    required: true
+  os-version:
+    description: CentOS Stream major version
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Checkout component source
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.repository }}
+        ref: release-${{ inputs.okd-version }}
+        fetch-depth: 1
+        path: source/${{ inputs.component }}
+        persist-credentials: false
+
+    - name: Build component RPMs
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        SPEC: ${{ inputs.spec-file }}
+        OS_VERSION: ${{ inputs.os-version }}
+      run: |
+        set -euo pipefail
+        source_dir="$GITHUB_WORKSPACE/source/$COMPONENT"
+        cd "$source_dir"
+        echo "Building $COMPONENT on CentOS Stream $OS_VERSION"
+
+        git config --global --add safe.directory "$source_dir"
+        COMMIT=$(git rev-parse --short HEAD)
+        VERSION_RAW=$(git describe --tags --abbrev=0 2>/dev/null || true)
+        VERSION_RAW="${VERSION_RAW#v}"
+        if [ "$COMPONENT" == "kubernetes" ]; then
+          KUBERNETES_VERSION=$(
+            grep -oE \
+              'kubernetes=1\.[0-9]+\.[0-9]+(-rc\.[0-9])?' \
+              openshift-hack/images/hyperkube/Dockerfile.rhel |
+              head -n 1 | cut -d= -f2 || true
+          )
+          VERSION_RAW="${KUBERNETES_VERSION:-$VERSION_RAW}"
+        fi
+        VERSION_RAW="${VERSION_RAW:-0.0.1}"
+        if [ ! -f "$SPEC" ]; then
+          echo "A valid RPM spec_file is required for $COMPONENT." >&2
+          exit 1
+        fi
+
+        VERSION="v${VERSION_RAW}"
+        export OS_GIT_VERSION="${VERSION}+${COMMIT}"
+        export OS_GIT_COMMIT="$COMMIT"
+        export OS_GIT_MAJOR
+        OS_GIT_MAJOR=$(cut -d. -f1 <<< "$VERSION_RAW")
+        export OS_GIT_MINOR
+        OS_GIT_MINOR=$(cut -d. -f2 <<< "$VERSION_RAW")
+        export OS_GIT_PATCH
+        OS_GIT_PATCH=$(cut -d. -f3 <<< "$VERSION_RAW")
+        export OS_GIT_TREE_STATE=dirty
+
+        if [ "$SPEC" == "oc.spec" ]; then
+          sed -i '/BuildRequires:.*goversioninfo/d' "$SPEC"
+        fi
+        dnf builddep -y "$SPEC"
+
+        VERSION_SPEC=$(rpmspec -q --qf "%{version}\n" "$SPEC" | head -n 1)
+        if [ "$COMPONENT" == "kubernetes" ]; then
+          VERSION_SPEC="$VERSION_RAW"
+        fi
+        NAME=$(
+          rpmspec --define "version $VERSION_SPEC" \
+            -q --qf "%{name}\n" "$SPEC" | head -n 1
+        )
+        VERSION_SPEC=$(
+          rpmspec --define "version $VERSION_SPEC" \
+            -q --qf "%{version}\n" "$SPEC" | head -n 1
+        )
+        SOURCE0=$(
+          rpmspec --define "version $VERSION_SPEC" -P "$SPEC" |
+            sed -n 's/^Source0:[[:space:]]*//p' |
+            head -n 1
+        )
+        SOURCE_FILE="${SOURCE0##*/}"
+        if [ -z "$SOURCE_FILE" ] || [ "$SOURCE_FILE" == "(none)" ]; then
+          echo "Unable to determine source archive name from $SPEC." >&2
+          exit 1
+        fi
+        mkdir -p _rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+        tar -czf "_rpmbuild/SOURCES/${SOURCE_FILE}" \
+          --exclude='./.git' \
+          --exclude='./_output' \
+          --exclude='./_rpmbuild' \
+          --transform="s|^|$NAME-$VERSION_SPEC/|rSH" ./
+        rpmbuild_args=(
+          -ba "$SPEC"
+          --define "_topdir $PWD/_rpmbuild"
+          --define "version $VERSION_SPEC"
+          --define "release 1"
+          --define "commit $COMMIT"
+          --define "os_git_vars \
+            OS_GIT_VERSION='$OS_GIT_VERSION' \
+            OS_GIT_COMMIT='$OS_GIT_COMMIT' \
+            OS_GIT_MAJOR='$OS_GIT_MAJOR' \
+            OS_GIT_MINOR='$OS_GIT_MINOR' \
+            OS_GIT_TREE_STATE='$OS_GIT_TREE_STATE'"
+        )
+        if [[ "$COMPONENT" == *credential-provider ]]; then
+          rpmbuild_args+=(--define "build_ldflags %{nil}")
+        fi
+        rpmbuild "${rpmbuild_args[@]}"

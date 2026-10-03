@@ -81,17 +81,14 @@ jobs:
         run: |
           set -euo pipefail
           config_path="$GITHUB_WORKSPACE/os/base/${STREAM}/source"
-          patch="$GITHUB_WORKSPACE/os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch"
-          if git -C "$config_path" apply --check "$patch"; then
+          patch_dir="$GITHUB_WORKSPACE/os/base/${STREAM}/patches"
+          shopt -s nullglob
+          patches=("$patch_dir"/*.patch)
+          for patch in "${patches[@]}"; do
+            echo "Applying ${patch##*/}"
             git -C "$config_path" apply "$patch"
-            git -C "$config_path" diff --check
-          elif [[ "$STREAM" == "c9s" ]]; then
-            echo "The required c9s patch no longer applies." >&2
-            exit 1
-          else
-            echo "The c9s compatibility patch does not apply to $STREAM;" \
-              "continuing without it."
-          fi
+          done
+          git -C "$config_path" diff --check
           config_revision=$(git -C "$config_path" rev-parse HEAD)
           echo "COREOS_CONFIG_REVISION=$config_revision" >> "$GITHUB_ENV"
 
@@ -186,20 +183,19 @@ jobs:
           skopeo copy \
             "oci-archive:${{ steps.oci-image.outputs.path }}" \
             "containers-storage:localhost/scos-base-source:${STREAM}"
-          cat > "$RUNNER_TEMP/Containerfile" <<EOF
-          FROM localhost/scos-base-source:${STREAM}
-          ARG COREOS_CONFIG_SOURCE
-          LABEL org.opencontainers.image.source="\${COREOS_CONFIG_SOURCE}"
-          LABEL org.opencontainers.image.version="${STREAM}"
-          LABEL org.opencontainers.image.revision="${COREOS_CONFIG_REVISION}"
-          LABEL io.okd.source.workflow.revision="${GITHUB_SHA}"
-          EOF
           config_source=https://github.com/coreos/rhel-coreos-config
-          podman build \
-            --build-arg "COREOS_CONFIG_SOURCE=$config_source" \
-            --tag "${image_ref}:${STREAM}" \
-            --file "$RUNNER_TEMP/Containerfile" \
-            "$RUNNER_TEMP"
+          container_id=$(podman create \
+            "localhost/scos-base-source:${STREAM}")
+          trap 'podman rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          podman commit \
+            --change "LABEL org.opencontainers.image.source=${config_source}" \
+            --change "LABEL org.opencontainers.image.version=${STREAM}" \
+            --change \
+              "LABEL org.opencontainers.image.revision=${COREOS_CONFIG_REVISION}" \
+            --change "LABEL io.okd.source.workflow.revision=${GITHUB_SHA}" \
+            "$container_id" "${image_ref}:${STREAM}"
+          podman rm "$container_id"
+          trap - EXIT
           podman push --format oci \
             "${image_ref}:${STREAM}" \
             "docker://${image_ref}:${STREAM}"

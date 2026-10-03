@@ -62,7 +62,7 @@ jobs:
             exit 1
           fi
 
-          dnf install -y nodejs curl jq
+          dnf install -y nodejs jq
 
           kvm_gid=$(stat -c '%g' /dev/kvm)
           if kvm_group=$(getent group "$kvm_gid"); then
@@ -100,49 +100,6 @@ jobs:
           CONFIGURED_SCOS_RUN_ID: ${{ vars.OKD_SCOS_BASE_RUN_ID }}
         run: |
           set -euo pipefail
-          latest_release_image() {
-            local version=$1
-            for page in $(seq 1 20); do
-              api_url=https://api.github.com/repos/okd-project/okd/releases
-              page_json=$(curl -fsSL \
-                --get "$api_url" \
-                --data-urlencode per_page=100 \
-                --data-urlencode "page=${page}")
-              image=$(jq -r --arg version "$version" '
-                [
-                  .[]
-                  | select(.draft == false and .prerelease == false)
-                  | select(
-                      .tag_name
-                      | test("^" + $version + "\\.[0-9]+-okd-scos\\.[0-9]+$")
-                    )
-                  | (.body
-                      | try capture(
-                          "Pull From:\\s*(?<image>[^[:space:]]+)"
-                        ).image
-                      catch ""
-                    ) as $image
-                  | select(
-                      $image
-                      | test("^quay\\.io/okd/scos-release@sha256:[0-9a-f]{64}$")
-                    )
-                  | {image: $image, published_at: .published_at}
-                ]
-                | sort_by(.published_at)
-                | last
-                | .image // empty
-              ' <<< "$page_json")
-              if [[ -n "$image" ]]; then
-                printf '%s' "$image"
-                return 0
-              fi
-              if [[ $(jq 'length' <<< "$page_json") -lt 100 ]]; then
-                break
-              fi
-            done
-            return 1
-          }
-
           if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
             scos_run_id="$CONFIGURED_SCOS_RUN_ID"
             oci_image_ref="$DEFAULT_OKD_IMAGE_REF"
@@ -188,29 +145,83 @@ jobs:
             release_image=$candidate_release
           fi
 
-          if [[ -z "$release_image" ]]; then
-            if [[ ! "$release_version" =~ ^4\.(20|21|22)$ ]]; then
-              echo "Provide a release_image when testing a digest-only" \
-                "image ref." >&2
-              exit 1
-            fi
-            release_image=$(latest_release_image "$release_version") || {
-              echo "Could not find a stable $release_version OKD release." >&2
-              exit 1
-            }
-          fi
+          echo "oci_image_ref=$oci_image_ref" >> "$GITHUB_OUTPUT"
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "release_image=$release_image" >> "$GITHUB_OUTPUT"
+          echo "scos_run_id=$scos_run_id" >> "$GITHUB_OUTPUT"
+          echo "kola_stream=$kola_stream" >> "$GITHUB_OUTPUT"
+          echo "test_version=$test_version" >> "$GITHUB_OUTPUT"
 
-          if [[ ! "$scos_run_id" =~ ^[0-9]{1,20}$ ]]; then
+      - name: Find latest stable OKD release payload
+        id: stable-release
+        if: steps.test-inputs.outputs.release_image == ''
+        uses: actions/github-script@v9
+        env:
+          RELEASE_VERSION: ${{ steps.test-inputs.outputs.release_version }}
+        with:
+          script: |
+            const version = process.env.RELEASE_VERSION ?? "";
+            if (!/^4\.(20|21|22)$/.test(version)) {
+              throw new Error(
+                "Provide release_image when testing a digest-only image ref."
+              );
+            }
+            const imagePattern =
+              /^quay\.io\/okd\/scos-release@sha256:[0-9a-f]{64}$/;
+            for (let page = 1; page <= 20; page++) {
+              const { data } = await github.rest.repos.listReleases({
+                owner: "okd-project",
+                repo: "okd",
+                per_page: 100,
+                page,
+              });
+              const matches = data
+                .filter((release) =>
+                  !release.draft &&
+                  !release.prerelease &&
+                  new RegExp(
+                    `^${version.replace(".", "\\.")}\\.\\d+-okd-scos\\.\\d+$`
+                  ).test(release.tag_name)
+                )
+                .map((release) => ({
+                  image: release.body?.match(/Pull From:\s*(\S+)/)?.[1] ?? "",
+                  published_at: release.published_at ?? "",
+                }))
+                .filter((release) => imagePattern.test(release.image))
+                .sort((a, b) =>
+                  b.published_at.localeCompare(a.published_at)
+                );
+              if (matches.length) {
+                core.setOutput("release_image", matches[0].image);
+                return;
+              }
+              if (data.length < 100) break;
+            }
+            throw new Error(`Could not find a stable ${version} OKD release.`);
+
+      - name: Resolve upstream stream-coreos image
+        id: upstream-image
+        env:
+          INPUT_SCOS_RUN_ID: ${{ steps.test-inputs.outputs.scos_run_id }}
+          INPUT_OKD_IMAGE_REF: ${{ steps.test-inputs.outputs.oci_image_ref }}
+          INPUT_RELEASE_IMAGE: >-
+            ${{ steps.test-inputs.outputs.release_image ||
+                steps.stable-release.outputs.release_image }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$INPUT_SCOS_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
             echo "Set scos_run_id or the OKD_SCOS_BASE_RUN_ID repository variable" \
               "to a successful SCOS base workflow run ID." >&2
             exit 1
           fi
-          for image_ref in "$oci_image_ref" "$release_image"; do
-            if [[ ! "$image_ref" =~ ^[^[:space:]\|]+$ || "$image_ref" == docker://* ]]; then
+          for image_ref in "$INPUT_OKD_IMAGE_REF" "$INPUT_RELEASE_IMAGE"; do
+            if [[ ! "$image_ref" =~ ^[^[:space:]\|]+$ ||
+              "$image_ref" == docker://* ]]; then
               echo "Provide full image pullspecs without whitespace or docker://." >&2
               exit 1
             fi
           done
+          release_image=$INPUT_RELEASE_IMAGE
           release_pattern='^quay\.io/okd/scos-release@sha256:[0-9a-f]{64}$'
           if [[ ! "$release_image" =~ $release_pattern ]]; then
             echo "Expected a digest-pinned OKD SCOS release payload." >&2
@@ -225,16 +236,13 @@ jobs:
               "stream-coreos image." >&2
             exit 1
           fi
-          echo "oci_image_ref=$oci_image_ref" >> "$GITHUB_OUTPUT"
           echo "upstream_image_ref=$upstream_image_ref" >> "$GITHUB_OUTPUT"
-          echo "scos_run_id=$scos_run_id" >> "$GITHUB_OUTPUT"
-          echo "kola_stream=$kola_stream" >> "$GITHUB_OUTPUT"
-          echo "test_version=$test_version" >> "$GITHUB_OUTPUT"
 
       - name: Pull OCI images from registries
         env:
           OKD_IMAGE_REF: ${{ steps.test-inputs.outputs.oci_image_ref }}
-          UPSTREAM_IMAGE_REF: ${{ steps.test-inputs.outputs.upstream_image_ref }}
+          UPSTREAM_IMAGE_REF: >-
+            ${{ steps.upstream-image.outputs.upstream_image_ref }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/okd-image" "$RUNNER_TEMP/upstream-image"
