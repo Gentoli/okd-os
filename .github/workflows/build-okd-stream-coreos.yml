@@ -448,6 +448,10 @@ jobs:
               if (resolved.revision === "unknown") {
                 resolved.revision = process.env.RELEASE_COMMIT;
               }
+              if (imageRef === process.env.COMPOSED_IMAGE) {
+                resolved.version = process.env.RELEASE_TAG;
+                resolved.revision = process.env.RELEASE_COMMIT;
+              }
               return resolved;
             }
 
