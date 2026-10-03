@@ -1,0 +1,8 @@
+{
+  "id": "cri-tools__c10s-sig-cloud-okd-4.22__el9-okd4.22",
+  "project": "cri-tools",
+  "source_url": "https://gitlab.com/CentOS/cloud/rpms/cri-tools.git",
+  "source_branch": "c10s-sig-cloud-okd-4.22",
+  "target_el": "9",
+  "target_okd_version": "4.22"
+}
