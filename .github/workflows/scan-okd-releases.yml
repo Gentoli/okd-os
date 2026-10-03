@@ -112,10 +112,12 @@ jobs:
                     okd_version: version,
                     os_version: base.match(/^c(\d+)s$/)[1],
                     build_sig:
-                      (version === "4.22" && base === "c10s") ||
+                      (version === "4.22" &&
+                        (base === "c10s" || base === "c9s")) ||
                       (version === "4.20" && base === "c9s"),
                     run_test:
-                      (version === "4.22" && base === "c10s") ||
+                      (version === "4.22" &&
+                        (base === "c10s" || base === "c9s")) ||
                       (version === "4.20" && base === "c9s"),
                   }]),
                 repo_version:

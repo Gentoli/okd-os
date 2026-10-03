@@ -214,11 +214,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/source"
-          SIG_PROJECTS=(cri-o cri-tools conmon-rs)
-          if [[ "$OKD_VERSION" == "4.22" && "$OS_VERSION" == "9" ]]; then
-            SIG_PROJECTS=(cri-o)
-          fi
-          for SIG_PROJECT in "${SIG_PROJECTS[@]}"; do
+          for SIG_PROJECT in cri-o cri-tools conmon-rs; do
             apply_crio_el9_patch=false
             if [[ "$SIG_PROJECT" == "conmon-rs" ]]; then
               if [[ "$OS_VERSION" == "9" ]]; then
@@ -232,6 +228,9 @@ jobs:
               "$OS_VERSION" == "9" && "$OKD_VERSION" == "4.22" ]]; then
               sig_ref="c10s-sig-cloud-okd-${OKD_VERSION}"
               apply_crio_el9_patch=true
+            elif [[ "$SIG_PROJECT" == "cri-tools" &&
+              "$OS_VERSION" == "9" && "$OKD_VERSION" == "4.22" ]]; then
+              sig_ref="c10s-sig-cloud-okd-${OKD_VERSION}"
             else
               sig_ref="c${OS_VERSION}s-sig-cloud-okd-${OKD_VERSION}"
             fi

@@ -18,10 +18,11 @@ from the available 4.22 EL10 branch in an EL9 environment; this patch restores
 the two EL9 CNI dependency/configuration settings without reverting unrelated
 version or source changes.
 
-The `rpm-build.yml` workflow uses `c10s-sig-cloud-okd-4.22` only for the
-4.22/EL9 CRI-O build, applies this patch before fetching lookaside sources, and
-builds it in the EL9 container. Other components and the 4.22/EL10 build keep
-their existing source branches and specs.
+For 4.22/EL9, the RPM workflow builds CRI-O and cri-tools from the available
+`c10s-sig-cloud-okd-4.22` branches, while conmon-rs uses the shared
+`c9s-sig-cloud` branch. It applies this patch only to CRI-O and builds all three
+packages in the EL9 container so the image workflow's SIG RPM preflight is
+complete. Other targets keep their existing source branches and specs.
 
 ## Reproduce the EL9 build locally
 
