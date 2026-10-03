@@ -54,7 +54,15 @@ fetched `source_ref`, and fetched `target_ref` if the mirror exists.
    order. Include rewritten/cherry-picked commits with their new local IDs.
    Finish with exactly one machine-readable line:
 
-   `COMMIT_OIDS: <full_oid> [<full_oid> ...]`
+   Start with `COMMIT_OIDS:` and append the actual full hexadecimal commit IDs,
+   separated by spaces. Do not include brackets, backticks, angle brackets, or
+   explanatory text on that line. For example, a two-commit report is:
+
+   ```text
+   COMMIT_OIDS: c3917c558a79c47db21bda758d655d7c04e6e792 3e5efb7689ed7f758b0f96f545046b20dbbc6655
+   ```
+
+   These example IDs illustrate the format; report your own created IDs.
 
 An invoked update must produce the identity commit, even if the package needs
 no compatibility changes. `COMMIT_OIDS: NONE` is reserved for a no-op; do not
