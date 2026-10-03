@@ -1,0 +1,101 @@
+{
+  "build_targets": [
+    {
+      "okd_version": "4.22",
+      "os_version": "9",
+      "base": "c9s",
+      "repo_version": "9.8",
+      "run_test": true
+    },
+    {
+      "okd_version": "4.22",
+      "os_version": "10",
+      "base": "c10s",
+      "repo_version": "10.0",
+      "run_test": true
+    },
+    {
+      "okd_version": "4.20",
+      "os_version": "9",
+      "base": "c9s",
+      "repo_version": "9.6",
+      "run_test": true
+    }
+  ],
+  "sources": {
+    "4.22/el9": {
+      "cri-o": {
+        "url": "https://github.com/Gentoli/okd-os.git",
+        "branch": "rpms/cri-o-el9-4.22"
+      },
+      "cri-tools": {
+        "url": "https://github.com/Gentoli/okd-os.git",
+        "branch": "rpms/cri-tools-el9-4.22"
+      },
+      "conmon-rs": {
+        "url": "https://github.com/Gentoli/okd-os.git",
+        "branch": "rpms/conmon-rs-el9"
+      }
+    },
+    "4.22/el10": {
+      "cri-o": {
+        "url": "https://gitlab.com/CentOS/cloud/rpms/cri-o.git",
+        "branch": "c10s-sig-cloud-okd-4.22"
+      },
+      "cri-tools": {
+        "url": "https://gitlab.com/CentOS/cloud/rpms/cri-tools.git",
+        "branch": "c10s-sig-cloud-okd-4.22"
+      },
+      "conmon-rs": {
+        "url": "https://gitlab.com/CentOS/cloud/rpms/conmon-rs.git",
+        "branch": "cloud10s-okd-4.22-el10s"
+      }
+    },
+    "4.20/el9": {
+      "cri-o": {
+        "url": "https://gitlab.com/CentOS/cloud/rpms/cri-o.git",
+        "branch": "c9s-sig-cloud-okd-4.20"
+      },
+      "cri-tools": {
+        "url": "https://gitlab.com/CentOS/cloud/rpms/cri-tools.git",
+        "branch": "c9s-sig-cloud-okd-4.20"
+      },
+      "conmon-rs": {
+        "url": "https://github.com/Gentoli/okd-os.git",
+        "branch": "rpms/conmon-rs-el9"
+      }
+    }
+  },
+  "mirrors": [
+    {
+      "id": "cri-o-el9-4.22",
+      "project": "cri-o",
+      "target_el": "9",
+      "target_version": "4.22",
+      "source_url": "https://gitlab.com/CentOS/cloud/rpms/cri-o.git",
+      "source_branch": "c10s-sig-cloud-okd-4.22",
+      "target_branch": "rpms/cri-o-el9-4.22",
+      "spec": "SPECS/cri-o.spec"
+    },
+    {
+      "id": "cri-tools-el9-4.22",
+      "project": "cri-tools",
+      "target_el": "9",
+      "target_version": "4.22",
+      "source_url": "https://gitlab.com/CentOS/cloud/rpms/cri-tools.git",
+      "source_branch": "c10s-sig-cloud-okd-4.22",
+      "target_branch": "rpms/cri-tools-el9-4.22",
+      "spec": "SPECS/cri-tools.spec"
+    },
+    {
+      "id": "conmon-rs-el9",
+      "project": "conmon-rs",
+      "target_el": "9",
+      "target_version": "el9",
+      "source_url": "https://gitlab.com/CentOS/cloud/rpms/conmon-rs.git",
+      "source_branch": "c9s-sig-cloud",
+      "target_branch": "rpms/conmon-rs-el9",
+      "spec": "SPECS/conmon-rs.spec"
+    }
+  ]
+}

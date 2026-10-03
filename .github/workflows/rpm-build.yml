@@ -195,160 +195,113 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build CentOS SIG RPMs locally
+      - name: Build CentOS SIG RPMs from source plan
         env:
           OKD_VERSION: ${{ inputs.okd_version }}
           OS_VERSION: ${{ inputs.os_version }}
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/source"
-          for SIG_PROJECT in cri-o cri-tools conmon-rs; do
-            source_url="https://gitlab.com/CentOS/cloud/rpms/${SIG_PROJECT}.git"
-            source_refs=()
-            if [[ "$SIG_PROJECT" == "conmon-rs" ]]; then
-              if [[ "$OS_VERSION" == "9" ]]; then
-                source_refs+=("c9s-sig-cloud-okd-${OKD_VERSION}")
-                source_refs+=("c9s-sig-cloud")
-                if [[ "$OKD_VERSION" == "4.22" ]]; then
-                  source_refs+=("cloud10s-okd-${OKD_VERSION}-el10s")
-                fi
-                source_refs+=("c10s-sig-cloud")
-              elif [[ "$OKD_VERSION" == "4.22" ]]; then
-                source_refs+=("cloud10s-okd-${OKD_VERSION}-el10s")
-                source_refs+=("c10s-sig-cloud")
-              else
-                source_refs+=("c10s-sig-cloud")
-                source_refs+=("c9s-sig-cloud")
-              fi
-            else
-              source_refs+=(
-                "c${OS_VERSION}s-sig-cloud-okd-${OKD_VERSION}"
-              )
-              if [[ "$OS_VERSION" == "9" ]]; then
-                source_refs+=("c10s-sig-cloud-okd-${OKD_VERSION}")
-                source_refs+=("c9s-sig-cloud" "c10s-sig-cloud")
-              else
-                source_refs+=("c9s-sig-cloud-okd-${OKD_VERSION}")
-                source_refs+=("c10s-sig-cloud" "c9s-sig-cloud")
-              fi
-            fi
-
-            sig_ref=""
-            for candidate_ref in "${source_refs[@]}"; do
-              if git ls-remote --exit-code --heads "$source_url" \
-                "refs/heads/$candidate_ref" >/dev/null; then
-                sig_ref="$candidate_ref"
-                break
-              fi
-            done
-            if [[ -z "$sig_ref" ]]; then
-              echo "No source branch found for ${SIG_PROJECT}." >&2
-              exit 1
-            fi
-            fallback=false
-            if [[ "$sig_ref" != "${source_refs[0]}" ]]; then
-              fallback=true
-            fi
-
-            source_dir="$GITHUB_WORKSPACE/source/$SIG_PROJECT"
-            git clone --depth 1 --single-branch \
-              --branch "$sig_ref" "$source_url" "$source_dir"
-            source_commit=$(git -C "$source_dir" rev-parse HEAD)
-            echo "Using ${SIG_PROJECT} source ${sig_ref} at ${source_commit}"
-
-            cd "$source_dir"
-            spec="SPECS/${SIG_PROJECT}.spec"
-            if [ ! -f "$spec" ] || [ ! -f sources ]; then
-              echo "Expected $spec and the package sources manifest."
-              exit 1
-            fi
-            topdir="$GITHUB_WORKSPACE/rpmbuild/$SIG_PROJECT"
-            mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-            mkdir -p "$topdir/PATCHES"
-
-            if [[ "$fallback" == true ]]; then
-              source_version=$(rpmspec -q --qf "%{version}\n" "$spec" |
-                head -n 1)
-              package_name=$(rpmspec -q --qf "%{name}\n" "$spec" |
-                head -n 1)
-              patch_id=$(
-                printf 'source_%s_package_%s_target_%s' \
-                  "$source_version" "$package_name" "$OKD_VERSION" |
-                tr -c '[:alnum:]_.' '_'
-              )
-              patch_file="$topdir/PATCHES/${patch_id}.patch"
-              python3 - "$spec" "$patch_id" "$patch_file" <<'PY'
-          from difflib import unified_diff
+          python3 - <<'PY'
           from pathlib import Path
+          import json
+          import os
           import re
-          import sys
+          import shutil
+          import subprocess
 
-          spec_path = Path(sys.argv[1])
-          patch_id = sys.argv[2]
-          patch_path = Path(sys.argv[3])
-          original = spec_path.read_text()
-          release_line = re.compile(
-              r"^(Release:\s*)([^\r\n]*?)(\r?\n|$)", re.MULTILINE
-          )
-          matches = list(release_line.finditer(original))
-          if len(matches) != 1:
-              raise SystemExit(
-                  f"Expected one Release field in {spec_path}, "
-                  f"found {len(matches)}."
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          target = f"{os.environ['OKD_VERSION']}/el{os.environ['OS_VERSION']}"
+          plan = json.loads((workspace / "rpms/mirror-plan.json").read_text())
+          sources = plan["sources"].get(target)
+          if sources is None:
+              raise SystemExit(f"No RPM source plan for {target}.")
+
+          (workspace / "source").mkdir(exist_ok=True)
+          (workspace / "rpmbuild").mkdir(exist_ok=True)
+          for project in ("cri-o", "cri-tools", "conmon-rs"):
+              source = sources[project]
+              source_dir = workspace / "source" / project
+              topdir = workspace / "rpmbuild" / project
+              spec = Path("SPECS") / f"{project}.spec"
+              subprocess.run(
+                [
+                    "git", "clone", "--depth", "1", "--single-branch",
+                    "--branch", source["branch"], source["url"],
+                    str(source_dir),
+                ],
+                check=True,
               )
-          match = matches[0]
-          release = match.group(2).rstrip()
-          updated = (
-              original[:match.start()]
-              + f"{match.group(1)}{release}.fallback.{patch_id}"
-              + match.group(3)
-              + original[match.end():]
-          )
-          patch_path.write_text(
-              "".join(
-                  unified_diff(
-                      original.splitlines(keepends=True),
-                      updated.splitlines(keepends=True),
-                      fromfile=f"a/{spec_path.as_posix()}",
-                      tofile=f"b/{spec_path.as_posix()}",
-                  )
+              revision = subprocess.check_output(
+                ["git", "-C", str(source_dir), "rev-parse", "HEAD"],
+                text=True,
+              ).strip()
+              print(
+                f"Using {project} source {source['branch']} at {revision}",
+                flush=True,
               )
-          )
+
+              if not (source_dir / spec).is_file() or not (
+                source_dir / "sources"
+              ).is_file():
+                raise SystemExit(
+                    f"Expected {spec} and the package sources manifest."
+                )
+              subprocess.run(
+                ["centpkg-sig", "sources"],
+                cwd=source_dir,
+                check=True,
+              )
+              for directory in (
+                "BUILD", "BUILDROOT", "RPMS", "SOURCES", "SPECS", "SRPMS"
+              ):
+                (topdir / directory).mkdir(parents=True, exist_ok=True)
+
+              manifest = (source_dir / "sources").read_text().splitlines()
+              filenames = []
+              for line in manifest:
+                match = re.match(r"^[^ ]+ \(([^)]+)\) = ", line)
+                if match:
+                    filenames.append(match.group(1))
+              for filename in filenames:
+                candidates = (
+                    source_dir / filename,
+                    source_dir / "SOURCES" / filename,
+                )
+                source_file = next(
+                    (candidate for candidate in candidates if candidate.is_file()),
+                    None,
+                )
+                if source_file is None:
+                    raise SystemExit(f"Missing lookaside source: {filename}")
+                shutil.copy2(source_file, topdir / "SOURCES" / filename)
+              source_dir_sources = source_dir / "SOURCES"
+              if source_dir_sources.is_dir():
+                shutil.copytree(
+                    source_dir_sources,
+                    topdir / "SOURCES",
+                    dirs_exist_ok=True,
+                )
+
+              subprocess.run(
+                ["dnf", "builddep", "-y", str(spec)],
+                cwd=source_dir,
+                check=True,
+              )
+              subprocess.run(
+                [
+                    "rpmbuild", "-ba", str(spec),
+                    "--define", f"_topdir {topdir}",
+                    "--define", f"_sourcedir {topdir / 'SOURCES'}",
+                ],
+                cwd=source_dir,
+                check=True,
+              )
+              rpms = list((topdir / "RPMS").rglob("*.rpm"))
+              if not rpms:
+                raise SystemExit(
+                    f"Local rpmbuild produced no RPM artifacts for {project}."
+                )
           PY
-              git apply "$patch_file"
-              echo "Applied fallback patch ${patch_id} for ${SIG_PROJECT}."
-            fi
-
-            if [[ "$fallback" == true && "$SIG_PROJECT" == "cri-o" &&
-              "$OS_VERSION" == "9" && "$OKD_VERSION" == "4.22" ]]; then
-              git apply "$GITHUB_WORKSPACE/rpm-patches/cri-o-el9.patch"
-            fi
-
-            centpkg-sig sources
-            while IFS= read -r filename; do
-              source_file="$filename"
-              if [ ! -f "$source_file" ] && [ -f "SOURCES/$filename" ]; then
-                source_file="SOURCES/$filename"
-              fi
-              if [ ! -f "$source_file" ]; then
-                echo "Missing lookaside source: $filename"
-                exit 1
-              fi
-              cp "$source_file" "$topdir/SOURCES/"
-            done < <(sed -nE 's/^[^ ]+ \(([^)]+)\) = .*/\1/p' sources)
-            if [ -d SOURCES ]; then
-              cp -a SOURCES/. "$topdir/SOURCES/"
-            fi
-            dnf builddep -y "$spec"
-            rpmbuild -ba "$spec" \
-              --define "_topdir $topdir" \
-              --define "_sourcedir $topdir/SOURCES"
-            if ! find "$topdir/RPMS" -type f -name '*.rpm' -print -quit \
-              | grep -q .; then
-              echo "Local rpmbuild produced no RPM artifacts for $SIG_PROJECT."
-              exit 1
-            fi
-          done
 
       - name: Archive CentOS SIG source build artifacts
         uses: actions/upload-artifact@v4
@@ -356,9 +309,7 @@ jobs:
           name: >-
             ${{ format('sig-rpms-okd{0}-el{1}',
             inputs.okd_version, inputs.os_version) }}
-          path: |
-            rpmbuild/**/RPMS/**/*.rpm
-            rpmbuild/**/PATCHES/*.patch
+          path: rpmbuild/**/RPMS/**/*.rpm
           if-no-files-found: error
 
   test-rpm-install:
