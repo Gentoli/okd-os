@@ -1,0 +1,74 @@
+name: RPM Build Reproduction
+
+on:
+  workflow_dispatch:
+    inputs:
+      okd_version:
+        description: OKD version to build
+        required: true
+        default: "4.22"
+        type: string
+      os_version:
+        description: CentOS Stream major version
+        required: true
+        default: "10"
+        type: choice
+        options: ["9", "10"]
+      run_test:
+        description: Install and test the built RPMs
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  source-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.matrix.outputs.projects }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const plan = JSON.parse(require("node:fs").readFileSync("rpms/mirror-plan.json", "utf8"));
+            core.setOutput("projects", JSON.stringify(plan.sources.projects));
+
+  prepare-rpm-sources:
+    needs: source-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.source-matrix.outputs.projects) }}
+    permissions:
+      contents: write
+      copilot-requests: write
+    uses: ./.github/workflows/prepare-rpm-sources.yml
+    with:
+      okd_version: ${{ inputs.okd_version }}
+      os_version: ${{ inputs.os_version }}
+      project: ${{ matrix.project }}
+      artifact_name: rpm-source-${{ inputs.okd_version }}-el${{ inputs.os_version }}-${{ matrix.project }}
+
+  collect-rpm-sources:
+    needs: prepare-rpm-sources
+    runs-on: ubuntu-latest
+    outputs:
+      sources: ${{ steps.sources.outputs.sources }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: sources
+        uses: ./.github/actions/collect-rpm-sources
+
+  build-rpms:
+    needs: collect-rpm-sources
+    uses: ./.github/workflows/rpm-build.yml
+    with:
+      okd_version: ${{ inputs.okd_version }}
+      os_version: ${{ inputs.os_version }}
+      sig_sources: >-
+        ${{ toJSON(fromJSON(needs.collect-rpm-sources.outputs.sources)[format('{0}/el{1}', inputs.okd_version, inputs.os_version)]) }}
+      run_test: ${{ inputs.run_test }}

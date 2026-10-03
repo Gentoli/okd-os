@@ -1,0 +1,196 @@
+name: Sync RPM mirror
+
+on:
+  workflow_call:
+    inputs:
+      mirror:
+        description: One branch-based package mirror request
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  copilot-requests: write
+
+concurrency:
+  group: rpm-mirror-${{ fromJSON(inputs.mirror).target_branch }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up remotes and check upstream ancestry
+        id: prepare
+        uses: actions/github-script@v9
+        env:
+          MIRROR: ${{ inputs.mirror }}
+        with:
+          script: |
+            const { execFileSync } = require("node:child_process");
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const mirror = JSON.parse(process.env.MIRROR);
+            const git = (args) => execFileSync("git", args, {
+              encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+            }).trim();
+            const mirrorUrl = `https://github.com/${process.env.GITHUB_REPOSITORY}.git`;
+            git(["remote", "add", "rpm-upstream", mirror.source_url]);
+            git(["remote", "add", "rpm-mirror", mirrorUrl]);
+            const sourceRef = "refs/remotes/rpm-upstream/base";
+            const targetRef = "refs/remotes/rpm-mirror/target";
+            git(["fetch", "--no-tags", "rpm-upstream", `refs/heads/${mirror.source_branch}:${sourceRef}`]);
+            let oldHead = "";
+            try {
+              git(["ls-remote", "--exit-code", "--heads", "rpm-mirror", `refs/heads/${mirror.target_branch}`]);
+              git(["fetch", "--no-tags", "rpm-mirror", `refs/heads/${mirror.target_branch}:${targetRef}`]);
+              oldHead = git(["rev-parse", targetRef]);
+            } catch (error) {
+              if (error.status !== 2) throw error;
+            }
+            if (oldHead) {
+              try {
+                git(["merge-base", "--is-ancestor", sourceRef, targetRef]);
+                core.setOutput("update", "false");
+                core.info(`${mirror.target_branch} already incorporates ${mirror.source_branch}`);
+                return;
+              } catch (error) {
+                if (error.status !== 1) throw error;
+              }
+            }
+            git(["config", "user.name", "RPM Mirror Maintainer"]);
+            git(["config", "user.email", "rpm-mirror-maintainer@users.noreply.github.com"]);
+            git(["config", "commit.gpgsign", "false"]);
+            const worktree = path.join(process.env.RUNNER_TEMP, "rpm-mirror");
+            git(["worktree", "add", "--detach", worktree, oldHead ? targetRef : sourceRef]);
+            const mirrorContext = {
+              ...mirror, source_ref: sourceRef, target_ref: oldHead ? targetRef : null,
+              worktree, identity_file: ".rpm-patch.json",
+            };
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, "rpm-mirror-context.json"), JSON.stringify(mirrorContext, null, 2) + "\n");
+            core.setOutput("worktree", worktree);
+            core.setOutput("old_head", oldHead);
+            core.setOutput("staging_branch", `rpm-publish/${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-${mirror.patch_id}`);
+            core.setOutput("update", "true");
+
+      - name: Set up Node.js for Copilot CLI
+        if: steps.prepare.outputs.update == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Copilot CLI
+        if: steps.prepare.outputs.update == 'true'
+        run: npm install --global @github/copilot@1.0.91
+
+      - name: Maintain mirror with Copilot
+        id: agent
+        if: steps.prepare.outputs.update == 'true'
+        uses: actions/github-script@v9
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WORKTREE: ${{ steps.prepare.outputs.worktree }}
+        with:
+          script: |
+            const { spawn } = require("node:child_process");
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const read = (file) => fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE, file), "utf8");
+            const prompt = read(".github/prompts/rpm-mirror-maintenance.md") +
+              "\n\nRecipe:\n" + read("docs/module-patch.md") +
+              "\n\nRun context:\n" + fs.readFileSync(`${process.env.RUNNER_TEMP}/rpm-mirror-context.json`, "utf8");
+            let output = "";
+            await new Promise((resolve, reject) => {
+              const child = spawn("copilot", ["-p", prompt, "--model", "gpt-6-luna",
+                "--allow-tool=write", "--allow-tool=shell", "--no-auto-update", "-s"], {
+                cwd: process.env.WORKTREE, stdio: ["ignore", "pipe", "inherit"],
+              });
+              child.stdout.on("data", (chunk) => { output += chunk.toString(); process.stdout.write(chunk); });
+              child.on("error", reject);
+              child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`Copilot exited ${code}`)));
+            });
+            const report = output.match(/^COMMIT_OIDS:[ \t]*(NONE|[0-9a-f]{40}(?:[ \t]+[0-9a-f]{40})*)[ \t]*$/m);
+            if (!report) throw new Error("Copilot must report COMMIT_OIDS: <ordered IDs> or COMMIT_OIDS: NONE");
+            if (report[1] === "NONE") throw new Error("This mirror needs an update; report the identity commit even if no compatibility changes are needed");
+            const commits = report[1].split(/\s+/);
+            core.setOutput("commits", commits.join(" "));
+
+      - name: Seed temporary publishing branch
+        id: stage
+        if: steps.agent.outputs.commits != ''
+        uses: actions/github-script@v9
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WORKTREE: ${{ steps.prepare.outputs.worktree }}
+          COMMITS: ${{ steps.agent.outputs.commits }}
+          STAGING_BRANCH: ${{ steps.prepare.outputs.staging_branch }}
+        with:
+          script: |
+            const { execFileSync } = require("node:child_process");
+            const git = (args) => execFileSync("git", args, {
+              cwd: process.env.WORKTREE, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+            }).trim();
+            const commits = process.env.COMMITS.split(" ");
+            const base = git(["rev-parse", `${commits[0]}^`]);
+            const head = commits.at(-1);
+            const auth = Buffer.from(`x-access-token:${process.env.GITHUB_TOKEN}`).toString("base64");
+            core.setSecret(auth);
+            git(["-c", `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`,
+              "push", "rpm-mirror", `${base}:refs/heads/${process.env.STAGING_BRANCH}`]);
+            core.setOutput("revision", `${base}..${head}`);
+
+      - name: Sign agent-created patch commits
+        id: sign
+        if: steps.agent.outputs.commits != ''
+        uses: pgaskin/push-signed-commits@v1.2.1
+        with:
+          path: ${{ steps.prepare.outputs.worktree }}
+          repository: ${{ github.repository }}
+          branch: ${{ steps.prepare.outputs.staging_branch }}
+          revision: ${{ steps.stage.outputs.revision }}
+          github-token: ${{ github.token }}
+
+      - name: Publish signed mirror with a lease
+        if: steps.agent.outputs.commits != ''
+        uses: actions/github-script@v9
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MIRROR: ${{ inputs.mirror }}
+          WORKTREE: ${{ steps.prepare.outputs.worktree }}
+          OLD_HEAD: ${{ steps.prepare.outputs.old_head }}
+          STAGING_BRANCH: ${{ steps.prepare.outputs.staging_branch }}
+          SIGNED_HEAD: ${{ steps.sign.outputs.pushed-oid }}
+        with:
+          script: |
+            const { execFileSync } = require("node:child_process");
+            const mirror = JSON.parse(process.env.MIRROR);
+            const auth = Buffer.from(`x-access-token:${process.env.GITHUB_TOKEN}`).toString("base64");
+            core.setSecret(auth);
+            const git = (args) => execFileSync("git", ["-c",
+              `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`, ...args], {
+              cwd: process.env.WORKTREE, stdio: ["ignore", "pipe", "pipe"],
+            });
+            git(["fetch", "--no-tags", "rpm-mirror", `refs/heads/${process.env.STAGING_BRANCH}`]);
+            git(["push", `--force-with-lease=refs/heads/${mirror.target_branch}:${process.env.OLD_HEAD}`,
+              "rpm-mirror", `${process.env.SIGNED_HEAD}:refs/heads/${mirror.target_branch}`]);
+            core.info(`Published ${mirror.target_branch} at ${process.env.SIGNED_HEAD}`);
+
+      - name: Remove temporary publishing branch
+        if: ${{ always() && steps.agent.outputs.commits != '' }}
+        uses: actions/github-script@v9
+        env:
+          STAGING_BRANCH: ${{ steps.prepare.outputs.staging_branch }}
+        with:
+          script: |
+            try {
+              await github.rest.git.deleteRef({ ...context.repo, ref: `heads/${process.env.STAGING_BRANCH}` });
+            } catch (error) {
+              if (error.status !== 404 && error.status !== 422) throw error;
+            }

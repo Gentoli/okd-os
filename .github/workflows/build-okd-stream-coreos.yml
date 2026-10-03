@@ -31,10 +31,14 @@ on:
         description: OpenShift package repository version
         required: true
         type: string
-      rpm_targets:
-        description: JSON array of RPM build targets
+      sig_sources:
+        description: Prepared package source URLs and branches for this target
         required: true
         type: string
+      run_test:
+        description: Install and test the built RPMs
+        required: true
+        type: boolean
 permissions:
   actions: read
   contents: read
@@ -215,19 +219,15 @@ jobs:
   build-rpms:
     needs: resolve-source
     if: needs.resolve-source.outputs.compose == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(inputs.rpm_targets) }}
     permissions:
       actions: read
       contents: read
     uses: ./.github/workflows/rpm-build.yml
     with:
-      okd_version: ${{ matrix.okd_version }}
-      os_version: ${{ matrix.os_version }}
-      build_sig: ${{ matrix.build_sig }}
-      run_test: ${{ matrix.run_test }}
+      okd_version: ${{ inputs.version }}
+      os_version: ${{ inputs.os_major }}
+      sig_sources: ${{ inputs.sig_sources }}
+      run_test: ${{ inputs.run_test }}
 
   compose-base-image:
     needs:

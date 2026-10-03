@@ -1,31 +1,6 @@
-name: RPM Build Reproduction
+name: Build RPMs
 
 on:
-  workflow_dispatch:
-    inputs:
-      okd_version:
-        description: OKD version to build
-        required: true
-        default: "4.22"
-        type: string
-      os_version:
-        description: CentOS Stream major version
-        required: true
-        default: "10"
-        type: choice
-        options:
-          - "9"
-          - "10"
-      build_sig:
-        description: Build CentOS SIG RPMs for this target
-        required: true
-        default: true
-        type: boolean
-      run_test:
-        description: Install and test the built RPMs
-        required: true
-        default: true
-        type: boolean
   workflow_call:
     inputs:
       okd_version:
@@ -36,10 +11,10 @@ on:
         description: CentOS Stream major version
         required: true
         type: string
-      build_sig:
-        description: Build CentOS SIG RPMs for this target
+      sig_sources:
+        description: Prepared SIG package source URLs and branches
         required: true
-        type: boolean
+        type: string
       run_test:
         description: Install and test the built RPMs
         required: true
@@ -165,7 +140,6 @@ jobs:
     name: >-
       Build CentOS SIG RPMs for ${{ inputs.okd_version }}
       (EL${{ inputs.os_version }})
-    if: inputs.build_sig
     needs: build-rpms
     runs-on: ubuntu-latest
     timeout-minutes: 240
@@ -200,26 +174,13 @@ jobs:
           graphroot = "/var/lib/containers/storage"
           EOF
 
-      - name: Build CentOS SIG RPMs locally
+      - name: Build CentOS SIG RPMs from prepared branches
         env:
-          OKD_VERSION: ${{ inputs.okd_version }}
-          OS_VERSION: ${{ inputs.os_version }}
+          SIG_SOURCES: ${{ inputs.sig_sources }}
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/source"
-          for SIG_PROJECT in cri-o cri-tools conmon-rs; do
-            if [[ "$SIG_PROJECT" == "conmon-rs" ]]; then
-              if [[ "$OS_VERSION" == "9" ]]; then
-                sig_ref="c9s-sig-cloud"
-              elif [[ "$OKD_VERSION" == "4.22" ]]; then
-                sig_ref="cloud10s-okd-${OKD_VERSION}-el10s"
-              else
-                sig_ref="c10s-sig-cloud"
-              fi
-            else
-              sig_ref="c${OS_VERSION}s-sig-cloud-okd-${OKD_VERSION}"
-            fi
-            source_url="https://gitlab.com/CentOS/cloud/rpms/${SIG_PROJECT}.git"
+          while IFS=$'\t' read -r SIG_PROJECT source_url sig_ref; do
             source_dir="$GITHUB_WORKSPACE/source/$SIG_PROJECT"
             git clone --depth 1 --single-branch \
               --branch "$sig_ref" "$source_url" "$source_dir"
@@ -227,7 +188,7 @@ jobs:
             echo "Using ${SIG_PROJECT} source ${sig_ref} at ${source_commit}"
 
             cd "$source_dir"
-            centpkg-sig sources
+            centpkg-sig --name "$SIG_PROJECT" --namespace rpms sources
             spec="SPECS/${SIG_PROJECT}.spec"
             if [ ! -f "$spec" ] || [ ! -f sources ]; then
               echo "Expected $spec and the package sources manifest."
@@ -253,12 +214,8 @@ jobs:
             rpmbuild -ba "$spec" \
               --define "_topdir $topdir" \
               --define "_sourcedir $topdir/SOURCES"
-            if ! find "$topdir/RPMS" -type f -name '*.rpm' -print -quit \
-              | grep -q .; then
-              echo "Local rpmbuild produced no RPM artifacts for $SIG_PROJECT."
-              exit 1
-            fi
-          done
+          done < <(python3 -c 'import json, os; sources = json.loads(os.environ["SIG_SOURCES"]); print("\n".join("\t".join((project, source["url"], source["branch"])) for project, source in sources.items()))')
+        shell: bash
 
       - name: Archive CentOS SIG source build artifacts
         uses: actions/upload-artifact@v4
