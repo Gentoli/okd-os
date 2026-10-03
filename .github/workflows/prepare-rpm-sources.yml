@@ -19,10 +19,6 @@ on:
         description: Unique artifact name for the resolved package source
         required: true
         type: string
-    outputs:
-      sources:
-        description: Resolved source map for this package and target
-        value: ${{ jobs.resolve.outputs.sources }}
 
 permissions:
   contents: read
@@ -73,8 +69,6 @@ jobs:
         (needs.sync.result == 'success' || needs.sync.result == 'skipped')
       }}
     runs-on: ubuntu-latest
-    outputs:
-      sources: ${{ steps.resolve.outputs.sources }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

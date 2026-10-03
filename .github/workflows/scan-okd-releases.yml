@@ -164,6 +164,9 @@ jobs:
       - release-matrix
       - prepare-rpm-sources
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     outputs:
       matrix: ${{ steps.configs.outputs.matrix }}
     steps:
