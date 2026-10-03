@@ -33,12 +33,17 @@ before `%{?dist}`. The mirror workflow updates this deterministic release patch
 for every mirrored package, even when no additional functional EL
 compatibility change is needed; the RPM build only consumes the prepared spec.
 
-The `plan-rpm-mirrors` composite action uses inline `actions/github-script` to
-check exact upstream branches and mirror freshness using Git's
-patch-equivalence check. The planner skips when direct source branches suffice
-or all mirrors are current; otherwise it dispatches one version-scoped
-`sync-rpm-mirror.yml` run. It is also called by `scan-okd-releases.yml` before
-release builds. The sync workflow uses a single job: a GitHub Script step
+`scan-okd-releases.yml` plans the release matrix first, then passes only the
+selected OKD/EL target combinations to `plan-rpm-mirrors.yml`. Its composite
+action uses inline `actions/github-script` to check exact upstream branches and
+mirror freshness using Git's patch-equivalence check. The planner skips when
+direct source branches suffice or all selected mirrors are current; otherwise
+it passes the stale mirror list to one `sync-rpm-mirror.yml` reusable-workflow
+call. Both mirror workflows are reusable-only, and sync does not repeat source
+planning. The release-build matrix waits for planning and any required sync.
+Each target combination reaches its RPM build only once through the reusable
+image workflow; `reproduce-rpm-build.yml` is the manual RPM-build entry point.
+The sync workflow uses a single job: a GitHub Script step
 creates mirror worktrees and metadata, Copilot CLI replays missing commits and
 recreates the documented package patch using
 `.github/prompts/rpm-mirror-maintenance.md`, and the workflow publishes commits

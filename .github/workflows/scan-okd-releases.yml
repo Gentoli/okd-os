@@ -22,21 +22,13 @@ permissions:
   contents: read
 
 jobs:
-  plan-rpm-mirrors:
-    permissions:
-      contents: write
-      copilot-requests: write
-    uses: ./.github/workflows/plan-rpm-mirrors.yml
-    with:
-      okd_version: ""
-
   release-matrix:
-    needs: plan-rpm-mirrors
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       matrix: ${{ steps.releases.outputs.matrix }}
+      targets: ${{ steps.releases.outputs.targets }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -138,9 +130,27 @@ jobs:
               });
             }
             core.setOutput("matrix", JSON.stringify(matrix));
+            core.setOutput(
+              "targets",
+              JSON.stringify(targets.map((target) => ({
+                okd_version: target.version,
+                os_version: target.os_version,
+              }))),
+            );
+
+  plan-rpm-mirrors:
+    needs: release-matrix
+    permissions:
+      contents: write
+      copilot-requests: write
+    uses: ./.github/workflows/plan-rpm-mirrors.yml
+    with:
+      targets: ${{ needs.release-matrix.outputs.targets }}
 
   build:
-    needs: release-matrix
+    needs:
+      - release-matrix
+      - plan-rpm-mirrors
     strategy:
       fail-fast: false
       matrix:

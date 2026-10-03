@@ -1,16 +1,10 @@
 name: Sync RPM mirror branches
 
 on:
-  workflow_dispatch:
-    inputs:
-      okd_version:
-        description: OKD version whose missing RPM branches should be mirrored
-        required: true
-        type: string
   workflow_call:
     inputs:
-      okd_version:
-        description: OKD version whose missing RPM branches should be mirrored
+      mirrors:
+        description: JSON array of selected RPM mirrors requiring synchronization
         required: true
         type: string
 
@@ -35,20 +29,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Plan mirror changes
-        id: plan
-        uses: ./.github/actions/plan-rpm-mirrors
-        with:
-          repository: ${{ github.repository }}
-          okd-version: ${{ inputs.okd_version }}
-          plan-file: rpms/mirror-plan.json
-
       - name: Prepare mirror worktrees and metadata
-        if: steps.plan.outputs.needs-sync == 'true'
+        if: inputs.mirrors != '[]'
         uses: actions/github-script@v9
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          MIRRORS: ${{ steps.plan.outputs.mirrors }}
+          MIRRORS: ${{ inputs.mirrors }}
         with:
           script: |
             const { execFileSync } = require("node:child_process");
@@ -267,11 +253,11 @@ jobs:
             core.setOutput("prepared", String(prepared.length > 0));
 
       - name: Install Copilot CLI
-        if: steps.plan.outputs.needs-sync == 'true'
+        if: inputs.mirrors != '[]'
         run: npm install --global @github/copilot@1.0.91
 
       - name: Recreate mirror patches with Copilot
-        if: steps.plan.outputs.needs-sync == 'true'
+        if: inputs.mirrors != '[]'
         uses: actions/github-script@v9
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -619,7 +605,7 @@ jobs:
             }
 
       - name: Push signed mirror commits
-        if: steps.plan.outputs.needs-sync == 'true'
+        if: inputs.mirrors != '[]'
         uses: actions/github-script@v9
         env:
           GITHUB_TOKEN: ${{ github.token }}

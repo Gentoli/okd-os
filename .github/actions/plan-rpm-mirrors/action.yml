@@ -4,10 +4,9 @@ inputs:
   repository:
     description: Repository containing RPM mirror branches
     required: true
-  okd-version:
-    description: Limit planning to one OKD release
-    required: false
-    default: ""
+  targets:
+    description: JSON array of selected OKD version and OS version targets
+    required: true
   plan-file:
     description: Path to the RPM source plan
     required: false
@@ -26,7 +25,7 @@ runs:
       id: plan
       env:
         GH_REPOSITORY: ${{ inputs.repository }}
-        OKD_VERSION: ${{ inputs.okd-version }}
+        TARGETS: ${{ inputs.targets }}
         PLAN_FILE: ${{ inputs.plan-file }}
       with:
         script: |
@@ -244,11 +243,24 @@ runs:
             }
           }
 
-          const targets = plan.build_targets.filter(
-            (target) =>
-              !process.env.OKD_VERSION ||
-              target.okd_version === process.env.OKD_VERSION,
+          const selectedTargets = JSON.parse(process.env.TARGETS);
+          const allowedTargets = new Set(
+            plan.build_targets.map((target) =>
+              `${target.okd_version}/el${target.os_version}`,
+            ),
           );
+          const targetKeys = new Set();
+          for (const target of selectedTargets) {
+            const key = `${target.okd_version}/el${target.os_version}`;
+            if (!allowedTargets.has(key)) {
+              throw new Error(`RPM target is not in the source plan: ${key}`);
+            }
+            if (targetKeys.has(key)) {
+              throw new Error(`Duplicate RPM target: ${key}`);
+            }
+            targetKeys.add(key);
+          }
+          const targets = selectedTargets;
           const rows = [];
           const sharedDone = new Set();
           for (const target of targets) {
