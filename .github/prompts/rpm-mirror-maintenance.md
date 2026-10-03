@@ -1,10 +1,11 @@
-Maintain the RPM mirror described by the attached JSON context. Read the
-package spec and upstream changes before editing.
+Maintain the RPM mirror described by the attached JSON context. It includes
+the current spec, upstream spec, relevant upstream diff, and any conflict
+contents. Use this context when editing.
 
 Missing upstream commits have already been cherry-picked when possible. If a
-cherry-pick is in progress, resolve conflicts while preserving upstream changes
-and finish it with `git add` and `git cherry-pick --continue`. Confirm that
-every upstream commit is represented before finishing.
+cherry-pick is in progress, resolve conflicts while preserving upstream changes.
+Do not run shell commands, stage files, or continue a cherry-pick; the workflow
+handles Git operations.
 
 Recreate only compatibility changes required for the target EL. For CRI-O on
 EL9, preserve the `containernetworking-plugins` suggestion and the

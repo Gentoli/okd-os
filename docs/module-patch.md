@@ -45,7 +45,8 @@ recreates the documented package patch using
 with `push-signed-commits`. The job has `contents: write` and
 `copilot-requests: write`. Copilot uses `gpt-6-luna`, long context, and maximum
 reasoning effort. The organization must allow Copilot CLI requests billed to
-the organization.
+the organization. A new mirror branch is seeded with the upstream tip before
+the workflow's signed marker and compatibility commits are published.
 
 Updates append cherry-picked upstream changes to the mirror, retaining each
 change's patch equivalence. The branch-local `.rpm-mirror.json` records the

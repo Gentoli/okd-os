@@ -24,8 +24,8 @@ permissions:
 jobs:
   plan-rpm-mirrors:
     permissions:
-      actions: write
-      contents: read
+      contents: write
+      copilot-requests: write
     uses: ./.github/workflows/plan-rpm-mirrors.yml
     with:
       okd_version: ""

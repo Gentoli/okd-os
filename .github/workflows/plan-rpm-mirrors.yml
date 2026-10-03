@@ -66,29 +66,16 @@ jobs:
           fi
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
 
-  dispatch:
+  sync:
     needs: plan
     if: needs.plan.outputs.versions != '[]'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        okd_version: ${{ fromJSON(needs.plan.outputs.versions) }}
     permissions:
-      actions: write
-      contents: read
-    steps:
-      - name: Dispatch one sync workflow per stale mirror
-        uses: actions/github-script@v9
-        env:
-          VERSIONS: ${{ needs.plan.outputs.versions }}
-        with:
-          script: |
-            const versions = JSON.parse(process.env.VERSIONS);
-            const ref = context.payload.repository.default_branch;
-            for (const okd_version of versions) {
-              core.info(`Dispatching RPM mirror sync: ${okd_version}`);
-              await github.rest.actions.createWorkflowDispatch({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: "sync-rpm-mirror.yml",
-                ref,
-                inputs: { okd_version },
-              });
-            }
+      contents: write
+      copilot-requests: write
+    uses: ./.github/workflows/sync-rpm-mirror.yml
+    with:
+      okd_version: ${{ matrix.okd_version }}

@@ -7,6 +7,12 @@ on:
         description: OKD version whose missing RPM branches should be mirrored
         required: true
         type: string
+  workflow_call:
+    inputs:
+      okd_version:
+        description: OKD version whose missing RPM branches should be mirrored
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,6 +20,7 @@ permissions:
 concurrency:
   group: rpm-mirror
   cancel-in-progress: false
+  queue: max
 
 jobs:
   sync:
@@ -48,12 +55,13 @@ jobs:
             const fs = require("node:fs");
             const path = require("node:path");
 
-            function git(args, cwd) {
+            function git(args, cwd, extraEnv = {}) {
               try {
                 return execFileSync("git", args, {
                   cwd,
                   encoding: "utf8",
                   stdio: ["ignore", "pipe", "pipe"],
+                  env: { ...process.env, ...extraEnv },
                 }).trimEnd();
               } catch (error) {
                 throw new Error(
@@ -93,19 +101,38 @@ jobs:
                 );
               }
 
+              const repoPath = process.env.GITHUB_WORKSPACE;
+              const upstreamRemote = `rpm-upstream-${mirror.id}`;
+              const sourceRef = `refs/remotes/${upstreamRemote}/source`;
+              git(["remote", "add", upstreamRemote, mirror.source_url], repoPath);
+              git([
+                "fetch", "--quiet", "--no-tags", upstreamRemote,
+                `refs/heads/${mirror.source_branch}:${sourceRef}`,
+              ], repoPath);
+              if (git(["rev-parse", sourceRef], repoPath) !== mirror.source_sha) {
+                throw new Error(
+                  `Upstream ${mirror.source_branch} changed during setup; retry.`,
+                );
+              }
+
               let baseSha = currentTarget;
               if (!baseSha) {
-                const { owner, repo } = context.repo;
-                await github.rest.git.createRef({
-                  owner,
-                  repo,
-                  ref: `refs/heads/${mirror.target_branch}`,
-                  sha: mirror.source_sha,
+                const token = process.env.GITHUB_TOKEN;
+                const authHeader = `AUTHORIZATION: basic ${Buffer.from(
+                  `x-access-token:${token}`,
+                ).toString("base64")}`;
+                git([
+                  "push", "--quiet",
+                  `https://github.com/${process.env.GITHUB_REPOSITORY}.git`,
+                  `${sourceRef}:refs/heads/${mirror.target_branch}`,
+                ], repoPath, {
+                  GIT_CONFIG_COUNT: "1",
+                  GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+                  GIT_CONFIG_VALUE_0: authHeader,
                 });
                 baseSha = mirror.source_sha;
               }
 
-              const repoPath = process.env.GITHUB_WORKSPACE;
               const remoteRef = `refs/remotes/rpm-mirror/${mirror.id}`;
               git([
                 "fetch", "--quiet", "--no-tags",
@@ -143,20 +170,27 @@ jobs:
                 ], worktree);
               }
 
-              const upstreamRemote = `rpm-upstream-${mirror.id}`;
-              const sourceRef = `refs/remotes/${upstreamRemote}/source`;
-              git(["remote", "add", upstreamRemote, mirror.source_url], worktree);
-              git([
-                "fetch", "--quiet", "--no-tags", upstreamRemote,
-                `refs/heads/${mirror.source_branch}:${sourceRef}`,
-              ], worktree);
-              for (const commit of mirror.missing_commits) {
+              let pendingCommits = [];
+              for (let index = 0; index < mirror.missing_commits.length; index++) {
+                const commit = mirror.missing_commits[index];
                 try {
                   git(["cherry-pick", commit], worktree);
-                } catch {
+                } catch (error) {
+                  let cherryPick = false;
+                  try {
+                    git(
+                      ["rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD"],
+                      worktree,
+                    );
+                    cherryPick = true;
+                  } catch {
+                    cherryPick = false;
+                  }
+                  if (!cherryPick) throw error;
                   core.info(
                     `Cherry-pick ${commit} needs Copilot conflict resolution.`,
                   );
+                  pendingCommits = mirror.missing_commits.slice(index + 1);
                   break;
                 }
               }
@@ -175,18 +209,52 @@ jobs:
                 path.join(worktree, ".rpm-mirror.json"),
                 `${JSON.stringify(metadata, null, 2)}\n`,
               );
-              fs.writeFileSync(
-                path.join(process.env.RUNNER_TEMP, `${mirror.id}.json`),
-                `${JSON.stringify(mirror, null, 2)}\n`,
+              const contextPath = path.join(
+                process.env.RUNNER_TEMP,
+                `${mirror.id}.json`,
               );
+              const sourceSpec = git(
+                ["show", `${sourceRef}:${mirror.spec}`],
+                worktree,
+              );
+              const upstreamSpecDiff = git([
+                "diff", "--no-ext-diff",
+                baseSha, sourceRef, "--", mirror.spec,
+              ], worktree);
+              const currentSpec = fs.readFileSync(
+                path.join(worktree, mirror.spec),
+                "utf8",
+              );
+              const conflictedFiles = git([
+                "diff", "--name-only", "--diff-filter=U",
+              ], worktree).split("\n").filter(Boolean);
+              const conflictDiff = git([
+                "diff", "--no-ext-diff", "--cc",
+              ], worktree);
+              const conflictedContents = Object.fromEntries(
+                conflictedFiles.map((file) => [
+                  file,
+                  fs.readFileSync(path.join(worktree, file), "utf8"),
+                ]),
+              );
+              fs.writeFileSync(contextPath, `${JSON.stringify({
+                ...mirror,
+                source_spec: sourceSpec,
+                upstream_spec_diff: upstreamSpecDiff,
+                current_spec: currentSpec,
+                conflicted_files: conflictedFiles,
+                conflicted_contents: conflictedContents,
+                conflict_diff: conflictDiff,
+              }, null, 2)}\n`);
               prepared.push({
                 ...mirror,
+                pending_commits: pendingCommits,
+                metadata,
+                source_spec: sourceSpec,
+                upstream_spec_diff: upstreamSpecDiff,
                 worktree,
                 source_ref: sourceRef,
-                context_path: path.join(
-                  process.env.RUNNER_TEMP,
-                  `${mirror.id}.json`,
-                ),
+                context_path: contextPath,
                 base_sha: baseSha,
                 marker_exists: markerExists,
               });
@@ -211,6 +279,20 @@ jobs:
           script: |
             const { execFileSync } = require("node:child_process");
             const fs = require("node:fs");
+            function git(args, cwd, extraEnv = {}) {
+              try {
+                return execFileSync("git", args, {
+                  cwd,
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                  env: { ...process.env, ...extraEnv },
+                }).trimEnd();
+              } catch (error) {
+                throw new Error(
+                  `git ${args.join(" ")} failed: ${error.stderr?.toString() ?? error.message}`,
+                );
+              }
+            }
             const mirrors = JSON.parse(
               fs.readFileSync(
                 `${process.env.RUNNER_TEMP}/rpm-mirrors.json`,
@@ -219,34 +301,122 @@ jobs:
             );
             const instruction = `${process.env.GITHUB_WORKSPACE}/.github/prompts/rpm-mirror-maintenance.md`;
             for (const mirror of mirrors) {
-              execFileSync(
-                "copilot",
-                [
+              function currentConflict() {
+                try {
+                  git(
+                    ["rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD"],
+                    mirror.worktree,
+                  );
+                  return true;
+                } catch {
+                  return false;
+                }
+              }
+              function updateContext() {
+                const currentSpec = fs.readFileSync(
+                  `${mirror.worktree}/${mirror.spec}`,
+                  "utf8",
+                );
+                const context = {
+                  ...mirror,
+                  current_spec: currentSpec,
+                  conflicted_files: git([
+                    "diff", "--name-only", "--diff-filter=U",
+                  ], mirror.worktree).split("\n").filter(Boolean),
+                  conflicted_contents: Object.fromEntries(
+                    git([
+                      "diff", "--name-only", "--diff-filter=U",
+                    ], mirror.worktree)
+                      .split("\n")
+                      .filter(Boolean)
+                      .map((file) => [
+                        file,
+                        fs.readFileSync(
+                          `${mirror.worktree}/${file}`,
+                          "utf8",
+                        ),
+                      ]),
+                  ),
+                  conflict_diff: git([
+                    "diff", "--no-ext-diff", "--cc",
+                  ], mirror.worktree),
+                };
+                fs.writeFileSync(
+                  mirror.context_path,
+                  `${JSON.stringify(context, null, 2)}\n`,
+                );
+              }
+              function askCopilot(prompt) {
+                updateContext();
+                execFileSync("copilot", [
                   "-C", mirror.worktree,
                   "-p",
-                  "Read the attached repository instruction and " +
-                    "mirror context, then update only this mirror.",
+                  prompt,
                   "--attachment", instruction,
                   "--attachment", mirror.context_path,
                   "--model", "gpt-6-luna",
                   "--reasoning-effort", "max",
                   "--context", "long_context",
-                  "--allow-tool=shell(git:*)",
                   "--allow-tool=write",
-                  "--deny-tool=shell(git push)",
+                  "--deny-tool=shell",
                   "-s",
-                ],
-                {
+                ], {
                   cwd: mirror.worktree,
                   stdio: "inherit",
                   env: process.env,
-                },
+                });
+              }
+              function resolveConflict() {
+                if (!currentConflict()) return;
+                askCopilot(
+                  "Resolve the active upstream cherry-pick conflict using " +
+                    "the attached instruction and context. Edit only files " +
+                    "needed for this mirror; do not run shell commands or " +
+                    "stage or continue the cherry-pick.",
+                );
+                const unresolved = git([
+                  "diff", "--name-only", "--diff-filter=U",
+                ], mirror.worktree);
+                if (unresolved) {
+                  throw new Error(
+                    `Copilot left unresolved conflicts in ${mirror.target_branch}`,
+                  );
+                }
+                git(["add", "-A"], mirror.worktree);
+                git(
+                  ["cherry-pick", "--continue"],
+                  mirror.worktree,
+                  { GIT_EDITOR: "true" },
+                );
+              }
+
+              resolveConflict();
+              for (const commit of mirror.pending_commits) {
+                try {
+                  git(["cherry-pick", commit], mirror.worktree);
+                } catch (error) {
+                  if (!currentConflict()) throw error;
+                  resolveConflict();
+                }
+              }
+              askCopilot(
+                "Read the attached repository instruction and mirror context, " +
+                  "then update only this mirror's package spec.",
               );
 
               const spec = fs.readFileSync(
                 `${mirror.worktree}/${mirror.spec}`,
                 "utf8",
               );
+              const metadata = JSON.parse(fs.readFileSync(
+                `${mirror.worktree}/.rpm-mirror.json`,
+                "utf8",
+              ));
+              if (JSON.stringify(metadata) !== JSON.stringify(mirror.metadata)) {
+                throw new Error(
+                  `Copilot modified mirror metadata on ${mirror.target_branch}`,
+                );
+              }
               const releases = [
                 ...spec.matchAll(/^Release:\s*(\S+)/gm),
               ].map((match) => match[1]);
@@ -286,6 +456,37 @@ jobs:
               }
               if (unresolved || cherryPick) {
                 throw new Error(`Unresolved cherry-pick in ${mirror.target_branch}`);
+              }
+              const changedFiles = execFileSync(
+                "git",
+                ["diff", "--name-only", "-z", mirror.source_ref, "HEAD"],
+                { cwd: mirror.worktree, encoding: "utf8" },
+              ).split("\0").filter(Boolean);
+              const stagedFiles = execFileSync(
+                "git",
+                ["diff", "--cached", "--name-only", "-z"],
+                { cwd: mirror.worktree, encoding: "utf8" },
+              ).split("\0").filter(Boolean);
+              const untrackedFiles = execFileSync(
+                "git",
+                ["ls-files", "--others", "--exclude-standard", "-z"],
+                { cwd: mirror.worktree, encoding: "utf8" },
+              ).split("\0").filter(Boolean);
+              const allowedFiles = new Set([
+                mirror.spec,
+                ".rpm-mirror.json",
+              ]);
+              const unexpectedFiles = [
+                ...new Set([
+                  ...changedFiles,
+                  ...stagedFiles,
+                  ...untrackedFiles,
+                ]),
+              ].filter((file) => !allowedFiles.has(file));
+              if (unexpectedFiles.length) {
+                throw new Error(
+                  `Unexpected mirror changes: ${unexpectedFiles.join(", ")}`,
+                );
               }
               const missing = execFileSync(
                 "git",
