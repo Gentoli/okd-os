@@ -5,6 +5,7 @@ Run with Python 3, PyYAML, Node.js, and Git:
 No GitHub credentials, Copilot requests, or remote writes are used.
 """
 
+from fnmatch import fnmatchcase
 import json
 import os
 from pathlib import Path
@@ -71,6 +72,11 @@ def workflow(name):
 
 def script(name, job, step):
     return next(s["with"]["script"] for s in workflow(name)["jobs"][job]["steps"] if s.get("id") == step)
+
+
+def action_script(name, step):
+    action = yaml.load((ROOT / ".github/actions" / name / "action.yml").read_text(), Loader=yaml.BaseLoader)
+    return next(s["with"]["script"] for s in action["runs"]["steps"] if s.get("id") == step)
 
 
 class MirrorWorkflows(unittest.TestCase):
@@ -281,6 +287,79 @@ class MirrorWorkflows(unittest.TestCase):
         self.assertEqual(len(sources), 3)
         self.assertEqual({row["os_version"] for row in sources}, {"9"})
         self.assertEqual(len({row["artifact_name"] for row in sources}), 3)
+
+    def test_parallel_rpm_matrices_preserve_sources_and_collectible_artifacts(self):
+        supplied = {
+            "cri-o": {"url": "https://mirror.example/cri-o.git", "branch": "rpms/cri-o-el9-4.22"},
+            "cri-tools": {"url": "https://upstream.example/cri-tools.git", "branch": "c10s-sig-cloud-okd-4.22"},
+            "conmon-rs": {"url": "https://mirror.example/conmon-rs.git", "branch": "rpms/conmon-rs-el9"},
+        }
+        targets = [{"version": version, "os_major": el, "run_test": False, "release_image": "selected-image"}
+                   for version, el in (("4.22", "9"), ("4.22", "10"), ("4.20", "9"))]
+        self.env["TARGETS"] = json.dumps(targets)
+        self.env["SOURCES"] = json.dumps({f"{target['version']}/el{target['os_major']}": supplied
+                                        for target in targets})
+        result = self.run_script(action_script("prepare-rpm-build-matrices", "configs"))
+        self.assertNotIn("error", result)
+        configs = json.loads(result["outputs"]["matrix"])
+        self.assertEqual(len(configs), len(targets))
+        all_artifacts = []
+        for target, config in zip(targets, configs):
+            version, el = target["version"], target["os_major"]
+            with self.subTest(version=version, el=el):
+                self.assertEqual({key: config[key] for key in target}, target)
+                upstream = json.loads(config["upstream_matrix"])
+                sig = json.loads(config["sig_matrix"])
+                components = {row["component"] for row in upstream}
+                self.assertEqual(len(upstream), 6 if version == "4.22" else 5)
+                self.assertEqual("crio-credential-provider" in components, version == "4.22")
+                self.assertTrue({"kubernetes", "oc", "ecr-credential-provider",
+                                 "acr-credential-provider", "gcr-credential-provider"} <= components)
+                self.assertEqual({row["project"]: {"url": row["source_url"], "branch": row["source_branch"]}
+                                  for row in sig}, supplied)
+                names = [row["artifact_name"] for row in upstream + sig]
+                self.assertTrue(all(fnmatchcase(name, f"*-rpms-okd{version}-el{el}") for name in names))
+                all_artifacts.extend(names)
+        self.assertEqual(len(set(all_artifacts)), len(all_artifacts))
+
+    def test_parallel_rpm_builds_expand_inputs_and_install_waits_for_all(self):
+        jobs = workflow("rpm-build.yml")["jobs"]
+        self.assertNotIn("build-matrix", jobs)
+        for name, matrix_input in (("build-rpms", "upstream_matrix"), ("build-rpms-centos-sig", "sig_matrix")):
+            build = jobs[name]
+            self.assertNotIn("needs", build)
+            self.assertEqual(build["strategy"]["matrix"]["include"], "${{ fromJSON(inputs." + matrix_input + ") }}")
+            self.assertEqual(build["strategy"]["fail-fast"], "false")
+            upload = next(step for step in build["steps"] if step.get("uses") == "actions/upload-artifact@v4")
+            self.assertEqual(upload["with"]["name"], "${{ matrix.artifact_name }}")
+            self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        install = jobs["test-rpm-install"]
+        self.assertEqual(set(install["needs"]), {"build-rpms", "build-rpms-centos-sig"})
+        self.assertEqual(install["if"], "inputs.run_test")
+        self.assertEqual(install["steps"][0]["with"]["merge-multiple"], "true")
+
+    def test_missing_prepared_sources_fail_before_build_configurations(self):
+        self.env["TARGETS"] = json.dumps([{"version": "4.22", "os_major": "9"}])
+        self.env["SOURCES"] = json.dumps({"4.22/el9": {"cri-o": {"url": "mirror", "branch": "prepared"}}})
+        result = self.run_script(action_script("prepare-rpm-build-matrices", "configs"))
+        self.assertIn("Missing prepared RPM sources for 4.22/el9", result["error"])
+        self.assertEqual(result["outputs"], {})
+
+    def test_scan_and_reproduction_share_matrix_generation_and_pass_it_to_builds(self):
+        shared = "./.github/actions/prepare-rpm-build-matrices"
+        scan = workflow("scan-okd-releases.yml")["jobs"]
+        manual = workflow("reproduce-rpm-build.yml")["jobs"]
+        for job in (scan["compose-build-configs"], manual["collect-rpm-sources"]):
+            step = next(s for s in job["steps"] if s.get("id") == "configs")
+            self.assertEqual(step["uses"], shared)
+            self.assertEqual(step["with"]["sources"], "${{ steps.sources.outputs.sources }}")
+        result = self.run_script(script("reproduce-rpm-build.yml", "source-matrix", "matrix"))
+        self.assertEqual(json.loads(result["outputs"]["targets"]), [{"version": "4.22", "os_major": "9"}])
+        image = workflow("build-okd-stream-coreos.yml")["jobs"]["build-rpms"]
+        for matrix_input in ("upstream_matrix", "sig_matrix"):
+            self.assertEqual(scan["build"]["with"][matrix_input], "${{ matrix." + matrix_input + " }}")
+            self.assertEqual(image["with"][matrix_input], "${{ inputs." + matrix_input + " }}")
+            self.assertIn("[0]." + matrix_input, manual["build-rpms"]["with"][matrix_input])
 
     def test_workflow_boundaries_and_failure_gates(self):
         for name in ("prepare-rpm-sources.yml", "sync-rpm-mirror.yml", "rpm-build.yml", "build-okd-stream-coreos.yml"):

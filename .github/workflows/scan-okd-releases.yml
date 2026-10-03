@@ -11,6 +11,7 @@ on:
       - .github/workflows/prepare-rpm-sources.yml
       - .github/workflows/sync-rpm-mirror.yml
       - .github/actions/collect-rpm-sources/action.yml
+      - .github/actions/prepare-rpm-build-matrices/action.yml
       - .github/prompts/rpm-mirror-maintenance.md
       - docs/module-patch.md
       - rpms/mirror-plan.json
@@ -153,24 +154,10 @@ jobs:
         uses: ./.github/actions/collect-rpm-sources
       - name: Compose release build configurations
         id: configs
-        uses: actions/github-script@v9
-        env:
-          RELEASES: ${{ needs.release-matrix.outputs.matrix }}
-          SOURCES: ${{ steps.sources.outputs.sources }}
+        uses: ./.github/actions/prepare-rpm-build-matrices
         with:
-          script: |
-            const releases = JSON.parse(process.env.RELEASES);
-            const sources = JSON.parse(process.env.SOURCES);
-            const plan = JSON.parse(require("node:fs").readFileSync("rpms/mirror-plan.json", "utf8"));
-            const matrix = releases.map((release) => {
-              const key = `${release.version}/el${release.os_major}`;
-              const packages = sources[key];
-              if (plan.sources.projects.some((project) => !packages?.[project])) {
-                throw new Error(`Missing prepared RPM sources for ${key}`);
-              }
-              return { ...release, sig_sources: JSON.stringify(packages) };
-            });
-            core.setOutput("matrix", JSON.stringify(matrix));
+          targets: ${{ needs.release-matrix.outputs.matrix }}
+          sources: ${{ steps.sources.outputs.sources }}
 
   build:
     needs: compose-build-configs
@@ -191,6 +178,7 @@ jobs:
       base_stream: ${{ matrix.base }}
       os_major: ${{ matrix.os_major }}
       repo_version: ${{ matrix.repo_version }}
-      sig_sources: ${{ matrix.sig_sources }}
+      upstream_matrix: ${{ matrix.upstream_matrix }}
+      sig_matrix: ${{ matrix.sig_matrix }}
       run_test: ${{ matrix.run_test }}
     secrets: inherit

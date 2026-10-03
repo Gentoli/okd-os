@@ -31,8 +31,12 @@ on:
         description: OpenShift package repository version
         required: true
         type: string
-      sig_sources:
-        description: Prepared package source URLs and branches for this target
+      upstream_matrix:
+        description: Prepared upstream component build matrix for this target
+        required: true
+        type: string
+      sig_matrix:
+        description: Prepared SIG package build matrix for this target
         required: true
         type: string
       run_test:
@@ -226,7 +230,8 @@ jobs:
     with:
       okd_version: ${{ inputs.version }}
       os_version: ${{ inputs.os_major }}
-      sig_sources: ${{ inputs.sig_sources }}
+      upstream_matrix: ${{ inputs.upstream_matrix }}
+      sig_matrix: ${{ inputs.sig_matrix }}
       run_test: ${{ inputs.run_test }}
 
   compose-base-image:
