@@ -146,12 +146,11 @@ does not claim to be a clean upstream build.
 - The corresponding compatibility patch is
   [`0001-drop-unresolvable-fwupd-plugin.patch`](../../os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch).
   [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml) applies
-  it when applicable and builds both `c9s` and `c10s` variants with COSA.
+  it when applicable and builds the `c9s` variant with COSA.
   Pushes run on `main` when the workflow or base files change. Workflow
-  dispatch accepts an upstream config ref (default `HEAD`) and publishes only
-  `scos-base:c9s` or `scos-base:c10s`. The OCI archive artifact is named
-  `<stream>-vm`; its QEMU disk artifact is named
-  `<stream>-qemu-<run-id>`. The published base image includes source revision
+  dispatch accepts an upstream config ref (default `HEAD`) and publishes
+  `scos-base:c9s` and `scos-base:c9s-vm`. The QEMU disk is published in GHCR
+  as `scos-base:c9s-qemu-<run-id>`. Published images include source revision
   labels.
 - `docker/login-action` provides the GHCR credentials used when publishing.
   The action's post-job cleanup logs out at the end of the job.

@@ -57,9 +57,9 @@ candidate. OKD images use `<version>-<stream>` tags.
 The current
 [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml) workflow
 builds and publishes the SCOS base OCI image and its QEMU boot disk from the
-same COSA build. The OCI archive is uploaded as `<stream>-vm`; the QEMU disk is
-uploaded as `<stream>-qemu-<run-id>`. The Kola workflow downloads the QEMU
-artifact. The
+same COSA build. It publishes the VM image as `<stream>-vm` and stores the QEMU
+disk in a GHCR image tagged `<stream>-qemu-<run-id>`. The Kola workflow pulls
+that image and extracts the QEMU disk. The
 [`build-okd-stream-coreos.yml`](../../.github/workflows/build-okd-stream-coreos.yml)
 workflow publishes the final node image to GHCR; the test pulls both candidate
 images into local OCI archives rather than passing the image build's workflow
@@ -67,8 +67,8 @@ artifact.
 
 Run the VM with QEMU/KVM on an x86_64 runner that exposes `/dev/kvm`. The
 workflow checks for that device and fails rather than silently skipping the
-boot test. The QEMU artifact is retained for 90 days, which also limits the
-manual-dispatch window. The existing
+boot test. The GHCR QEMU image remains available until its tag is removed. The
+existing
 [`rpm-build.yml` package-install check](../../.github/workflows/rpm-build.yml)
 is useful coverage for RPM artifacts, but it does not boot the composed node
 image.

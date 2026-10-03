@@ -56,10 +56,10 @@ package set. The public image removes the need for an OpenShift pull secret just
 to obtain the base; it does not provide the OpenShift RPM repositories.
 
 This confirms compatibility at the OS-family and image-role level, not
-byte-for-byte equivalence with the private upstream base. The `c9s` and `c10s`
-tags are mutable. The base workflow builds both variants from
-`coreos/rhel-coreos-config` and labels them with the config commit and workflow
-commit. It publishes the OCI archive as `<stream>-vm` and the QEMU disk as
+byte-for-byte equivalence with the private upstream base. The `c9s` tag is
+mutable. The base workflow builds that variant from `coreos/rhel-coreos-config`
+and labels it with the config commit and workflow commit. It publishes the
+OCI image as `<stream>-vm` and the QEMU disk in GHCR as
 `<stream>-qemu-<run-id>`.
 
 ## How the pinned build composes the image
@@ -232,8 +232,8 @@ pre-releases, then builds a 4.20/4.21/4.22 × c9s/c10s matrix. If a matching
 `stream-coreos` image is present in a release payload, the workflow uses it as
 the input and only applies the kernel/GCC overlay. Otherwise it composes the
 machine image from the latest `scos-base:<stream>` image and the matching RPM
-artifacts. The `OKD_RPM_RUN_ID` repository variable (or manual
-`rpm_run_id` input) is needed only for fallback composes.
+artifacts. The manual `rpm_run_id` input is needed only for base composes; there
+is no repository-variable fallback.
 
 The workflow publishes `stream-coreos:<version>-<stream>` and
 `driver-toolkit:<version>-<stream>`. Each image records its release payload,
