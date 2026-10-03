@@ -26,24 +26,16 @@ permissions:
   contents: read
 
 jobs:
-  plan-sig-sources:
-    runs-on: ubuntu-latest
-    outputs:
-      sources: ${{ steps.plan.outputs.sources }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Resolve package sources
-        id: plan
-        uses: ./.github/actions/resolve-rpm-sources
-        with:
-          repository: ${{ github.repository }}
-          targets: '[{"okd_version":"${{ inputs.okd_version }}","os_version":"${{ inputs.os_version }}"}]'
-          plan-file: rpms/mirror-plan.json
+  prepare-rpm-sources:
+    permissions:
+      contents: write
+      copilot-requests: write
+    uses: ./.github/workflows/prepare-rpm-sources.yml
+    with:
+      targets: '[{"okd_version":"${{ inputs.okd_version }}","os_version":"${{ inputs.os_version }}"}]'
 
   build-rpms:
-    needs: plan-sig-sources
+    needs: prepare-rpm-sources
     permissions:
       actions: read
       contents: read
@@ -52,6 +44,6 @@ jobs:
       okd_version: ${{ inputs.okd_version }}
       os_version: ${{ inputs.os_version }}
       sig_sources: >-
-        ${{ toJSON(fromJSON(needs.plan-sig-sources.outputs.sources)[format(
+        ${{ toJSON(fromJSON(needs.prepare-rpm-sources.outputs.sources)[format(
           '{0}/el{1}', inputs.okd_version, inputs.os_version)]) }}
       run_test: ${{ inputs.run_test }}

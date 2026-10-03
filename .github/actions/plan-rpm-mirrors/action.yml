@@ -7,6 +7,9 @@ inputs:
   targets:
     description: JSON array of selected OKD version and OS version targets
     required: true
+  project:
+    description: RPM project to check
+    required: true
   plan-file:
     description: Path to the RPM source plan
     required: false
@@ -26,6 +29,7 @@ runs:
       env:
         GH_REPOSITORY: ${{ inputs.repository }}
         TARGETS: ${{ inputs.targets }}
+        PROJECT: ${{ inputs.project }}
         PLAN_FILE: ${{ inputs.plan-file }}
       with:
         script: |
@@ -37,7 +41,7 @@ runs:
           const plan = JSON.parse(fs.readFileSync(process.env.PLAN_FILE, "utf8"));
           const [owner, repoName] = process.env.GH_REPOSITORY.split("/");
           const githubUrl = `https://github.com/${process.env.GH_REPOSITORY}.git`;
-          const projects = ["cri-o", "cri-tools", "conmon-rs"];
+          const project = process.env.PROJECT;
 
           function git(args, cwd, allowFailure = false) {
             try {
@@ -244,6 +248,9 @@ runs:
           }
 
           const selectedTargets = JSON.parse(process.env.TARGETS);
+          if (!plan.sources.projects.includes(project)) {
+            throw new Error(`RPM project is not in the source plan: ${project}`);
+          }
           const allowedTargets = new Set(
             plan.build_targets.map((target) =>
               `${target.okd_version}/el${target.os_version}`,
@@ -266,7 +273,6 @@ runs:
           for (const target of targets) {
             const version = target.okd_version;
             const osVersion = String(target.os_version);
-            for (const project of projects) {
               const sourceUrl = plan.sources.upstream_url_pattern.replace(
                 "{project}",
                 project,
@@ -341,7 +347,6 @@ runs:
                 ),
               };
               rows.push(inspect(row, plan.sources.metadata_file));
-            }
           }
           const mirrors = rows.filter((row) => row.needs_sync);
           core.setOutput("mirrors", JSON.stringify(mirrors));

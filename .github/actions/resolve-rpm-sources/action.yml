@@ -7,6 +7,9 @@ inputs:
   targets:
     description: JSON array of OKD version and OS version targets
     required: true
+  project:
+    description: RPM project to resolve
+    required: true
   plan-file:
     description: Path to the RPM source plan
     required: false
@@ -23,6 +26,7 @@ runs:
       env:
         GH_REPOSITORY: ${{ inputs.repository }}
         RPM_TARGETS: ${{ inputs.targets }}
+        PROJECT: ${{ inputs.project }}
         PLAN_FILE: ${{ inputs.plan-file }}
       with:
         script: |
@@ -34,7 +38,10 @@ runs:
           const plan = JSON.parse(fs.readFileSync(process.env.PLAN_FILE, "utf8"));
           const targets = JSON.parse(process.env.RPM_TARGETS);
           const sources = {};
-          const projects = ["cri-o", "cri-tools", "conmon-rs"];
+          const project = process.env.PROJECT;
+          if (!plan.sources.projects.includes(project)) {
+            throw new Error(`RPM project is not in the source plan: ${project}`);
+          }
 
           function git(args, cwd, allowFailure = false) {
             try {
@@ -187,7 +194,6 @@ runs:
             const version = target.okd_version;
             const osVersion = String(target.os_version);
             const result = {};
-            for (const project of projects) {
               const upstreamUrl = plan.sources.upstream_url_pattern.replace(
                 "{project}",
                 project,

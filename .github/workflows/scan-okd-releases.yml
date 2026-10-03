@@ -9,7 +9,7 @@ on:
       - .github/actions/plan-rpm-mirrors/action.yml
       - .github/actions/resolve-rpm-sources/action.yml
       - .github/prompts/rpm-mirror-maintenance.md
-      - .github/workflows/plan-rpm-mirrors.yml
+      - .github/workflows/prepare-rpm-sources.yml
       - .github/workflows/sync-rpm-mirror.yml
       - rpms/mirror-plan.json
       - Dockerfile
@@ -138,40 +138,19 @@ jobs:
               }))),
             );
 
-  plan-rpm-mirrors:
+  prepare-rpm-sources:
     needs: release-matrix
     permissions:
       contents: write
       copilot-requests: write
-    uses: ./.github/workflows/plan-rpm-mirrors.yml
+    uses: ./.github/workflows/prepare-rpm-sources.yml
     with:
       targets: ${{ needs.release-matrix.outputs.targets }}
-
-  resolve-rpm-sources:
-    needs:
-      - release-matrix
-      - plan-rpm-mirrors
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      sources: ${{ steps.resolve.outputs.sources }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Resolve selected RPM sources
-        id: resolve
-        uses: ./.github/actions/resolve-rpm-sources
-        with:
-          repository: ${{ github.repository }}
-          targets: ${{ needs.release-matrix.outputs.targets }}
-          plan-file: rpms/mirror-plan.json
 
   compose-build-configs:
     needs:
       - release-matrix
-      - resolve-rpm-sources
+      - prepare-rpm-sources
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.configs.outputs.matrix }}
@@ -181,7 +160,7 @@ jobs:
         uses: actions/github-script@v9
         env:
           RELEASES: ${{ needs.release-matrix.outputs.matrix }}
-          SOURCES: ${{ needs.resolve-rpm-sources.outputs.sources }}
+          SOURCES: ${{ needs.prepare-rpm-sources.outputs.sources }}
         with:
           script: |
             const releases = JSON.parse(process.env.RELEASES);

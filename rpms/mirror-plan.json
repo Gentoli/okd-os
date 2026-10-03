@@ -23,6 +23,11 @@
     }
   ],
   "sources": {
+    "projects": [
+      "cri-o",
+      "cri-tools",
+      "conmon-rs"
+    ],
     "upstream_url_pattern": "https://gitlab.com/CentOS/cloud/rpms/{project}.git",
     "mirror_url_pattern": "https://github.com/{repository}.git",
     "metadata_file": ".rpm-mirror.json",
