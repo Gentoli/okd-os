@@ -114,7 +114,8 @@ The
 workflow may use `stream-coreos` from an OKD release payload as the starting
 image for its kernel overlay. That payload image is the final node image built
 by `openshift/os`, not the separate SCOS base. When no matching payload image is
-available, the workflow composes the machine image on top of `scos-base`.
+available, the workflow builds the matching RPMs and composes the machine image
+on top of `scos-base` in the same run.
 
 **Version caveat:** the pinned upstream build guide's example refers to SCOS
 4.21 and an RHEL 9.6 base, while the same commit's package manifest targets

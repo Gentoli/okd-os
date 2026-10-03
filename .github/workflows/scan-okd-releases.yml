@@ -6,17 +6,13 @@ on:
       - main
     paths:
       - .github/workflows/build-okd-stream-coreos.yml
+      - .github/workflows/rpm-build.yml
       - .github/workflows/scan-okd-releases.yml
       - Dockerfile
       - Dockerfile.dtk
   schedule:
     - cron: "17 6 1,15 * *"
   workflow_dispatch:
-    inputs:
-      rpm_run_id:
-        description: Successful RPM Build Reproduction run ID for base composes
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -34,7 +30,17 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            const versions = ["4.20", "4.21", "4.22"];
+            const targets = [
+              { version: "4.22", base: "c9s" },
+              { version: "4.22", base: "c10s" },
+              { version: "4.20", base: "c9s" },
+              // { version: "4.20", base: "c10s" },
+              // { version: "4.21", base: "c9s" },
+              // { version: "4.21", base: "c10s" },
+            ];
+            const versions = [
+              ...new Set(targets.map(({ version }) => version)),
+            ];
             const releases = [];
             const releasePattern = /^4\.(20|21|22)\.\d+-okd-scos\.\d+$/;
             const imagePattern =
@@ -89,7 +95,7 @@ jobs:
             }
 
             const matrix = [];
-            for (const version of versions) {
+            for (const { version, base } of targets) {
               const release = latestReleases[version];
               const { data: commit } = await github.rest.repos.getCommit({
                 owner: "okd-project",
@@ -97,24 +103,22 @@ jobs:
                 ref: release.tag,
               });
 
-              for (const base of ["c9s", "c10s"]) {
-                matrix.push({
-                  version,
-                  release_tag: release.tag,
-                  release_image: release.image,
-                  release_commit: commit.sha,
-                  base,
-                  os_major: base.match(/^c(\d+)s$/)[1],
-                  repo_version:
-                    base === "c10s"
-                      ? "10.0"
-                      : version === "4.20"
-                        ? "9.6"
-                        : version === "4.21"
-                          ? "9.7"
-                          : "9.8",
-                });
-              }
+              matrix.push({
+                version,
+                release_tag: release.tag,
+                release_image: release.image,
+                release_commit: commit.sha,
+                base,
+                os_major: base.match(/^c(\d+)s$/)[1],
+                repo_version:
+                  base === "c10s"
+                    ? "10.0"
+                    : version === "4.20"
+                      ? "9.6"
+                      : version === "4.21"
+                        ? "9.7"
+                        : "9.8",
+              });
             }
             core.setOutput("matrix", JSON.stringify(matrix));
 
@@ -137,5 +141,4 @@ jobs:
       base_stream: ${{ matrix.base }}
       os_major: ${{ matrix.os_major }}
       repo_version: ${{ matrix.repo_version }}
-      rpm_run_id: ${{ inputs.rpm_run_id }}
     secrets: inherit

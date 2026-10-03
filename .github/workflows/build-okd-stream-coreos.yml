@@ -31,11 +31,6 @@ on:
         description: OpenShift package repository version
         required: true
         type: string
-      rpm_run_id:
-        description: Successful RPM Build Reproduction run ID for base composes
-        required: false
-        type: string
-
 permissions:
   actions: read
   contents: read
@@ -76,38 +71,34 @@ jobs:
           set -euo pipefail
           inspect_image() {
             local image_ref=$1
-            local inspection
-            inspection=$(skopeo inspect "docker://${image_ref}")
-            jq -cn \
-              --argjson image "$inspection" \
-              '{
-                digest: $image.Digest,
-                stream: ($image.Labels["com.coreos.stream"] // ""),
+            skopeo inspect "docker://${image_ref}" | jq -c '{
+                digest: .Digest,
+                stream: (.Labels["com.coreos.stream"] // ""),
                 version: (
-                  $image.Labels["org.opencontainers.image.version"]
-                  // $image.Labels["com.coreos.buildid"]
+                  .Labels["org.opencontainers.image.version"]
+                  // .Labels["com.coreos.buildid"]
                   // "unknown"
                 ),
                 revision: (
-                  $image.Labels["org.opencontainers.image.revision"]
-                  // $image.Labels["io.openshift.build.commit.id"]
+                  .Labels["org.opencontainers.image.revision"]
+                  // .Labels["io.openshift.build.commit.id"]
                   // "unknown"
                 ),
                 scos_base_digest: (
-                  $image.Labels["io.okd.source.scos-base.digest"] // "unknown"
+                  .Labels["io.okd.source.scos-base.digest"] // "unknown"
                 ),
                 scos_base_version: (
-                  $image.Labels["io.okd.source.scos-base.version"] // "unknown"
+                  .Labels["io.okd.source.scos-base.version"] // "unknown"
                 ),
                 scos_base_revision: (
-                  $image.Labels["io.okd.source.scos-base.revision"] // "unknown"
+                  .Labels["io.okd.source.scos-base.revision"] // "unknown"
                 ),
                 openshift_os_revision: (
-                  $image.Labels["io.okd.source.openshift-os.revision"]
+                  .Labels["io.okd.source.openshift-os.revision"]
                   // "unknown"
                 ),
                 rpm_build_run: (
-                  $image.Labels["io.okd.source.rpm-build.run"] // "unknown"
+                  .Labels["io.okd.source.rpm-build.run"] // "unknown"
                 )
               }'
           }
@@ -164,15 +155,27 @@ jobs:
           echo "compose=$compose" >> "$GITHUB_OUTPUT"
           echo "skip_build=$skip_build" >> "$GITHUB_OUTPUT"
 
-  compose-base-image:
+  build-rpms:
     needs: resolve-source
+    if: needs.resolve-source.outputs.compose == 'true'
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/rpm-build.yml
+    with:
+      okd_version: ${{ inputs.version }}
+      os_version: ${{ inputs.os_major }}
+
+  compose-base-image:
+    needs:
+      - resolve-source
+      - build-rpms
     if: needs.resolve-source.outputs.compose == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     outputs:
       image_ref: ${{ steps.compose.outputs.image_ref }}
     env:
-      RPM_RUN_ID: ${{ inputs.rpm_run_id }}
       OKD_VERSION: ${{ inputs.version }}
       RELEASE_TAG: ${{ inputs.release_tag }}
       RELEASE_IMAGE: ${{ inputs.release_image }}
@@ -181,17 +184,6 @@ jobs:
       OS_MAJOR: ${{ inputs.os_major }}
       REPO_VERSION: ${{ inputs.repo_version }}
     steps:
-      - name: Validate RPM artifact run ID
-        id: rpm-run
-        run: |
-          set -euo pipefail
-          if [[ ! "$RPM_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
-            echo "A numeric rpm_run_id input is required when" \
-              "the payload has no matching stream-coreos image." >&2
-            exit 1
-          fi
-          echo "run_id=$RPM_RUN_ID" >> "$GITHUB_OUTPUT"
-
       - name: Checkout matching openshift/os source
         uses: actions/checkout@v4
         with:
@@ -227,9 +219,6 @@ jobs:
           pattern: "*-rpms-okd${{ inputs.version }}-el${{ inputs.os_major }}"
           path: ${{ runner.temp }}/okd-rpms
           merge-multiple: true
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.rpm-run.outputs.run_id }}
 
       - name: Prepare the local RPM repository
         env:
@@ -305,7 +294,7 @@ jobs:
             --label "io.okd.source.scos-base.digest=${base_digest}" \
             --label "io.okd.source.scos-base.revision=${base_revision}" \
             --label "io.okd.source.openshift-os.revision=${os_revision}" \
-            --label "io.okd.source.rpm-build.run=${RPM_RUN_ID}" \
+            --label "io.okd.source.rpm-build.run=${GITHUB_RUN_ID}" \
             --secret id=yumrepos,src="$RUNNER_TEMP/yumrepos" \
             --volume "$RUNNER_TEMP/okd-rpms:/var/tmp/okd-rpm-repo:ro" \
             --security-opt label=disable \
@@ -317,12 +306,17 @@ jobs:
   publish-overlays:
     needs:
       - resolve-source
+      - build-rpms
       - compose-base-image
     if: >-
       ${{
         always() &&
         needs.resolve-source.result == 'success' &&
         needs.resolve-source.outputs.skip_build != 'true' &&
+        (
+          needs.build-rpms.result == 'success' ||
+          needs.build-rpms.result == 'skipped'
+        ) &&
         (
           needs.compose-base-image.result == 'success' ||
           needs.compose-base-image.result == 'skipped'
