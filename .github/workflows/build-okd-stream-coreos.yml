@@ -96,6 +96,9 @@ jobs:
                 scos_base_digest: (
                   $image.Labels["io.okd.source.scos-base.digest"] // "unknown"
                 ),
+                scos_base_version: (
+                  $image.Labels["io.okd.source.scos-base.version"] // "unknown"
+                ),
                 scos_base_revision: (
                   $image.Labels["io.okd.source.scos-base.revision"] // "unknown"
                 ),
@@ -355,20 +358,6 @@ jobs:
           printf '%s' "$GHCR_TOKEN" |
             podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
-      - name: Select overlay source images
-        id: overlay-inputs
-        run: |
-          set -euo pipefail
-          stream_image="${STREAM_IMAGE:-$COMPOSED_IMAGE}"
-          dtk_image="${DTK_IMAGE:-$stream_image}"
-          if [[ -z "$stream_image" || -z "$dtk_image" ]]; then
-            echo "Could not select source images for the kernel/GCC overlays." \
-              >&2
-            exit 1
-          fi
-          echo "stream_image=$stream_image" >> "$GITHUB_OUTPUT"
-          echo "dtk_image=$dtk_image" >> "$GITHUB_OUTPUT"
-
       - name: Select kernel package version
         id: kernel
         run: |
@@ -391,179 +380,176 @@ jobs:
 
       - name: Resolve image provenance
         id: provenance
+        uses: actions/github-script@v9
         env:
+          STREAM_IMAGE: ${{ needs.resolve-source.outputs.stream_image }}
           STREAM_INFO: ${{ needs.resolve-source.outputs.stream_info }}
+          DTK_IMAGE: ${{ needs.resolve-source.outputs.dtk_image }}
           DTK_INFO: ${{ needs.resolve-source.outputs.dtk_info }}
-          STREAM_IMAGE_REF: ${{ steps.overlay-inputs.outputs.stream_image }}
-          DTK_IMAGE_REF: ${{ steps.overlay-inputs.outputs.dtk_image }}
-        run: |
-          set -euo pipefail
-          resolve_metadata() {
-            local prefix=$1
-            local source_info=$2
-            local image_ref=$3
-            local digest version revision
-            local scos_base_version scos_base_digest scos_base_revision
-            local openshift_os_revision rpm_build_run
+          COMPOSED_IMAGE: ${{ needs.compose-base-image.outputs.image_ref }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_COMMIT: ${{ inputs.release_commit }}
+        with:
+          script: |
+            const { execFileSync } = require("node:child_process");
+            const streamImage =
+              process.env.STREAM_IMAGE || process.env.COMPOSED_IMAGE;
+            const dtkImage = process.env.DTK_IMAGE || streamImage;
+            if (!streamImage || !dtkImage) {
+              throw new Error("Could not select overlay source images.");
+            }
 
-            if [[ "$source_info" == '{}' ]]; then
-              source_info=$(skopeo inspect "docker://${image_ref}")
-              digest=$(jq -r '.Digest // "unknown"' <<< "$source_info")
-              scos_base_version=$(jq -r \
-                '.Labels["io.okd.source.scos-base.version"] // "unknown"' \
-                <<< "$source_info")
-              scos_base_digest=$(jq -r \
-                '.Labels["io.okd.source.scos-base.digest"] // "unknown"' \
-                <<< "$source_info")
-              scos_base_revision=$(jq -r \
-                '.Labels["io.okd.source.scos-base.revision"] // "unknown"' \
-                <<< "$source_info")
-              openshift_os_revision=$(jq -r \
-                '.Labels["io.okd.source.openshift-os.revision"] // "unknown"' \
-                <<< "$source_info")
-              rpm_build_run=$(jq -r \
-                '.Labels["io.okd.source.rpm-build.run"] // "unknown"' \
-                <<< "$source_info")
-              version=$RELEASE_TAG
-              revision=$RELEASE_COMMIT
-            else
-              digest=$(jq -r '.digest // "unknown"' <<< "$source_info")
-              version=$(jq -r '.version // "unknown"' <<< "$source_info")
-              revision=$(jq -r '.revision // "unknown"' <<< "$source_info")
-              scos_base_version=$(jq -r \
-                '.scos_base_version // "unknown"' <<< "$source_info")
-              scos_base_digest=$(jq -r \
-                '.scos_base_digest // "unknown"' <<< "$source_info")
-              scos_base_revision=$(jq -r \
-                '.scos_base_revision // "unknown"' <<< "$source_info")
-              openshift_os_revision=$(jq -r \
-                '.openshift_os_revision // "unknown"' <<< "$source_info")
-              rpm_build_run=$(jq -r \
-                '.rpm_build_run // "unknown"' <<< "$source_info")
-            fi
+            function inspectImage(imageRef) {
+              const result = execFileSync(
+                "skopeo",
+                ["inspect", `docker://${imageRef}`],
+                { encoding: "utf8" }
+              );
+              return JSON.parse(result);
+            }
 
-            [[ "$version" != "unknown" ]] || version=$RELEASE_TAG
-            [[ "$revision" != "unknown" ]] || revision=$RELEASE_COMMIT
-            {
-              echo "${prefix}_digest=$digest"
-              echo "${prefix}_version=$version"
-              echo "${prefix}_revision=$revision"
-              echo "${prefix}_scos_base_version=$scos_base_version"
-              echo "${prefix}_scos_base_digest=$scos_base_digest"
-              echo "${prefix}_scos_base_revision=$scos_base_revision"
-              echo "${prefix}_openshift_os_revision=$openshift_os_revision"
-              echo "${prefix}_rpm_build_run=$rpm_build_run"
-            } >> "$GITHUB_OUTPUT"
-          }
+            function metadata(rawInfo, imageRef) {
+              const info = JSON.parse(rawInfo || "{}");
+              const source = info && Object.keys(info).length
+                ? info
+                : inspectImage(imageRef);
+              const labels = source.Labels ?? {};
+              const value = (key, fallback = "unknown") =>
+                labels[key] ?? fallback;
+              const resolved = {
+                digest: source.digest ?? source.Digest ?? "unknown",
+                version:
+                  source.version ??
+                  value("org.opencontainers.image.version",
+                    labels["com.coreos.buildid"] ?? "unknown"),
+                revision:
+                  source.revision ??
+                  value("org.opencontainers.image.revision",
+                    labels["io.openshift.build.commit.id"] ?? "unknown"),
+                scos_base_version:
+                  source.scos_base_version ??
+                  value("io.okd.source.scos-base.version"),
+                scos_base_digest:
+                  source.scos_base_digest ??
+                  value("io.okd.source.scos-base.digest"),
+                scos_base_revision:
+                  source.scos_base_revision ??
+                  value("io.okd.source.scos-base.revision"),
+                openshift_os_revision:
+                  source.openshift_os_revision ??
+                  value("io.okd.source.openshift-os.revision"),
+                rpm_build_run:
+                  source.rpm_build_run ??
+                  value("io.okd.source.rpm-build.run"),
+              };
+              if (resolved.version === "unknown") {
+                resolved.version = process.env.RELEASE_TAG;
+              }
+              if (resolved.revision === "unknown") {
+                resolved.revision = process.env.RELEASE_COMMIT;
+              }
+              return resolved;
+            }
 
-          resolve_metadata stream "$STREAM_INFO" "$STREAM_IMAGE_REF"
-          resolve_metadata dtk "$DTK_INFO" "$DTK_IMAGE_REF"
+            const sources = {
+              STREAM: {
+                image: streamImage,
+                info: process.env.STREAM_INFO,
+              },
+              DTK: {
+                image: dtkImage,
+                info: process.env.DTK_INFO,
+              },
+            };
+            for (const [prefix, source] of Object.entries(sources)) {
+              core.exportVariable(`${prefix}_SOURCE_IMAGE`, source.image);
+              for (const [key, value] of Object.entries(
+                metadata(source.info, source.image)
+              )) {
+                const name = `${prefix}_SOURCE_${key.toUpperCase()}`;
+                core.exportVariable(name, value);
+              }
+            }
 
-      - name: Build and publish stream-coreos
+      - name: Build and publish overlay images
+        uses: actions/github-script@v9
         env:
-          BASE_IMAGE: ${{ steps.overlay-inputs.outputs.stream_image }}
           KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
-          SOURCE_IMAGE_REF: ${{ steps.overlay-inputs.outputs.stream_image }}
-          SOURCE_DIGEST: ${{ steps.provenance.outputs.stream_digest }}
-          SOURCE_VERSION: ${{ steps.provenance.outputs.stream_version }}
-          SOURCE_REVISION: ${{ steps.provenance.outputs.stream_revision }}
-          SCOS_BASE_VERSION: >-
-            ${{ steps.provenance.outputs.stream_scos_base_version }}
-          SCOS_BASE_DIGEST: >-
-            ${{ steps.provenance.outputs.stream_scos_base_digest }}
-          SCOS_BASE_REVISION: >-
-            ${{ steps.provenance.outputs.stream_scos_base_revision }}
-          OPENSHIFT_OS_REVISION: >-
-            ${{ steps.provenance.outputs.stream_openshift_os_revision }}
-          RPM_BUILD_RUN: ${{ steps.provenance.outputs.stream_rpm_build_run }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          owner=${GITHUB_REPOSITORY_OWNER,,}
-          image_ref="ghcr.io/${owner}/stream-coreos"
-          image_tag="${OKD_VERSION}-${BASE_STREAM}"
-          source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
-          labels=(
-            --label "org.opencontainers.image.source=${source_url}"
-            --label "org.opencontainers.image.version=${OKD_VERSION}"
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}"
-            --label "org.opencontainers.image.base.name=${SOURCE_IMAGE_REF}"
-            --label "org.opencontainers.image.base.digest=${SOURCE_DIGEST}"
-            --label "io.okd.source.release.tag=${RELEASE_TAG}"
-            --label "io.okd.source.release.payload=${RELEASE_IMAGE}"
-            --label "io.okd.source.release.revision=${RELEASE_COMMIT}"
-            --label "io.okd.source.image.version=${SOURCE_VERSION}"
-            --label "io.okd.source.image.revision=${SOURCE_REVISION}"
-            --label "io.okd.source.image.digest=${SOURCE_DIGEST}"
-            --label "io.okd.source.scos-base.version=${SCOS_BASE_VERSION}"
-            --label "io.okd.source.scos-base.digest=${SCOS_BASE_DIGEST}"
-            --label "io.okd.source.scos-base.revision=${SCOS_BASE_REVISION}"
-            --label \
-              "io.okd.source.openshift-os.revision=${OPENSHIFT_OS_REVISION}"
-            --label "io.okd.source.rpm-build.run=${RPM_BUILD_RUN}"
-            --label "io.okd.source.base.stream=${BASE_STREAM}"
-            --label "io.okd.source.kernel.version=${KERNEL_VERSION}"
-          )
-          podman build \
-            --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
-            --build-arg "VERSION=${KERNEL_VERSION}" \
-            --build-arg "STREAM_MAJOR=${OS_MAJOR}" \
-            "${labels[@]}" \
-            --file Dockerfile \
-            --tag "${image_ref}:${image_tag}" \
-            .
-          podman push "${image_ref}:${image_tag}"
-
-      - name: Build and publish driver-toolkit
-        env:
-          BASE_IMAGE: ${{ steps.overlay-inputs.outputs.dtk_image }}
-          KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
-          SOURCE_IMAGE_REF: ${{ steps.overlay-inputs.outputs.dtk_image }}
-          SOURCE_DIGEST: ${{ steps.provenance.outputs.dtk_digest }}
-          SOURCE_VERSION: ${{ steps.provenance.outputs.dtk_version }}
-          SOURCE_REVISION: ${{ steps.provenance.outputs.dtk_revision }}
-          SCOS_BASE_VERSION: >-
-            ${{ steps.provenance.outputs.dtk_scos_base_version }}
-          SCOS_BASE_DIGEST: >-
-            ${{ steps.provenance.outputs.dtk_scos_base_digest }}
-          SCOS_BASE_REVISION: >-
-            ${{ steps.provenance.outputs.dtk_scos_base_revision }}
-          OPENSHIFT_OS_REVISION: >-
-            ${{ steps.provenance.outputs.dtk_openshift_os_revision }}
-          RPM_BUILD_RUN: ${{ steps.provenance.outputs.dtk_rpm_build_run }}
-        run: |
-          set -euo pipefail
-          owner=${GITHUB_REPOSITORY_OWNER,,}
-          image_ref="ghcr.io/${owner}/driver-toolkit"
-          image_tag="${OKD_VERSION}-${BASE_STREAM}"
-          source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
-          labels=(
-            --label "org.opencontainers.image.source=${source_url}"
-            --label "org.opencontainers.image.version=${OKD_VERSION}"
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}"
-            --label "org.opencontainers.image.base.name=${SOURCE_IMAGE_REF}"
-            --label "org.opencontainers.image.base.digest=${SOURCE_DIGEST}"
-            --label "io.okd.source.release.tag=${RELEASE_TAG}"
-            --label "io.okd.source.release.payload=${RELEASE_IMAGE}"
-            --label "io.okd.source.release.revision=${RELEASE_COMMIT}"
-            --label "io.okd.source.image.version=${SOURCE_VERSION}"
-            --label "io.okd.source.image.revision=${SOURCE_REVISION}"
-            --label "io.okd.source.image.digest=${SOURCE_DIGEST}"
-            --label "io.okd.source.scos-base.version=${SCOS_BASE_VERSION}"
-            --label "io.okd.source.scos-base.digest=${SCOS_BASE_DIGEST}"
-            --label "io.okd.source.scos-base.revision=${SCOS_BASE_REVISION}"
-            --label \
-              "io.okd.source.openshift-os.revision=${OPENSHIFT_OS_REVISION}"
-            --label "io.okd.source.rpm-build.run=${RPM_BUILD_RUN}"
-            --label "io.okd.source.base.stream=${BASE_STREAM}"
-            --label "io.okd.source.kernel.version=${KERNEL_VERSION}"
-          )
-          podman build \
-            --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
-            --build-arg "VERSION=${KERNEL_VERSION}" \
-            --build-arg "STREAM_MAJOR=${OS_MAJOR}" \
-            "${labels[@]}" \
-            --file Dockerfile.dtk \
-            --tag "${image_ref}:${image_tag}" \
-            .
-          podman push "${image_ref}:${image_tag}"
+        with:
+          script: |
+            const { execFileSync } = require("node:child_process");
+            const owner = process.env.GITHUB_REPOSITORY_OWNER.toLowerCase();
+            const sourceUrl =
+              `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}`;
+            const imageTag =
+              `${process.env.OKD_VERSION}-${process.env.BASE_STREAM}`;
+            const commonLabels = {
+              "org.opencontainers.image.source": sourceUrl,
+              "org.opencontainers.image.version": process.env.OKD_VERSION,
+              "org.opencontainers.image.revision": process.env.GITHUB_SHA,
+              "io.okd.source.release.tag": process.env.RELEASE_TAG,
+              "io.okd.source.release.payload": process.env.RELEASE_IMAGE,
+              "io.okd.source.release.revision": process.env.RELEASE_COMMIT,
+              "io.okd.source.base.stream": process.env.BASE_STREAM,
+              "io.okd.source.kernel.version": process.env.KERNEL_VERSION,
+            };
+            const images = [
+              {
+                name: "stream-coreos",
+                prefix: "STREAM",
+                dockerfile: "Dockerfile",
+              },
+              {
+                name: "driver-toolkit",
+                prefix: "DTK",
+                dockerfile: "Dockerfile.dtk",
+              },
+            ];
+            for (const image of images) {
+              const prefix = image.prefix;
+              const sourceImage = process.env[`${prefix}_SOURCE_IMAGE`];
+              const labels = {
+                ...commonLabels,
+                "org.opencontainers.image.base.name": sourceImage,
+                "org.opencontainers.image.base.digest":
+                  process.env[`${prefix}_SOURCE_DIGEST`],
+                "io.okd.source.image.version":
+                  process.env[`${prefix}_SOURCE_VERSION`],
+                "io.okd.source.image.revision":
+                  process.env[`${prefix}_SOURCE_REVISION`],
+                "io.okd.source.image.digest":
+                  process.env[`${prefix}_SOURCE_DIGEST`],
+                "io.okd.source.scos-base.version":
+                  process.env[`${prefix}_SOURCE_SCOS_BASE_VERSION`],
+                "io.okd.source.scos-base.digest":
+                  process.env[`${prefix}_SOURCE_SCOS_BASE_DIGEST`],
+                "io.okd.source.scos-base.revision":
+                  process.env[`${prefix}_SOURCE_SCOS_BASE_REVISION`],
+                "io.okd.source.openshift-os.revision":
+                  process.env[`${prefix}_SOURCE_OPENSHIFT_OS_REVISION`],
+                "io.okd.source.rpm-build.run":
+                  process.env[`${prefix}_SOURCE_RPM_BUILD_RUN`],
+              };
+              const imageRef = `ghcr.io/${owner}/${image.name}:${imageTag}`;
+              const args = [
+                "build",
+                "--build-arg",
+                `BASE_IMAGE=${sourceImage}`,
+                "--build-arg",
+                `VERSION=${process.env.KERNEL_VERSION}`,
+                "--build-arg",
+                `STREAM_MAJOR=${process.env.OS_MAJOR}`,
+              ];
+              for (const [key, value] of Object.entries(labels)) {
+                args.push("--label", `${key}=${value ?? "unknown"}`);
+              }
+              args.push(
+                "--file",
+                image.dockerfile,
+                "--tag",
+                imageRef,
+                "."
+              );
+              execFileSync("podman", args, { stdio: "inherit" });
+              execFileSync("podman", ["push", imageRef], { stdio: "inherit" });
+            }
