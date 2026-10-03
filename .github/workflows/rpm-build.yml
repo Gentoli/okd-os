@@ -138,6 +138,16 @@ jobs:
           okd-version: ${{ inputs.okd_version }}
           os-version: ${{ inputs.os_version }}
 
+      - name: Build CRI-O credential provider RPM
+        if: inputs.okd_version == '4.22'
+        uses: ./.github/actions/build-upstream-rpm
+        with:
+          component: crio-credential-provider
+          repository: openshift/crio-credential-provider
+          spec-file: crio-credential-provider.spec
+          okd-version: ${{ inputs.okd_version }}
+          os-version: ${{ inputs.os_version }}
+
       - name: Archive RPM Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -256,7 +266,7 @@ jobs:
           name: >-
             ${{ format('sig-rpms-okd{0}-el{1}',
             inputs.okd_version, inputs.os_version) }}
-          path: rpmbuild/**/*.rpm
+          path: rpmbuild/**/RPMS/**/*.rpm
           if-no-files-found: error
 
   test-rpm-install:
@@ -283,6 +293,7 @@ jobs:
       - name: Install all RPMs
         env:
           OS_VERSION: ${{ inputs.os_version }}
+          OKD_VERSION: ${{ inputs.okd_version }}
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/rpm-test-report"
@@ -295,17 +306,23 @@ jobs:
           dnf config-manager --set-enabled crb
           dnf makecache
           mapfile -d "" rpms < <(
-            find "$GITHUB_WORKSPACE/rpms" -type f -name "*.rpm" -print0
+            find "$GITHUB_WORKSPACE/rpms" -type f -name "*.rpm" \
+              ! -name "*.src.rpm" ! -name "*.nosrc.rpm" -print0
           )
           if [ "${#rpms[@]}" -eq 0 ]; then
             echo "No RPM artifacts were downloaded." >&2
             exit 1
           fi
           dnf install -y "${rpms[@]}"
-          for capability in \
+          capabilities=(
             ose-aws-ecr-image-credential-provider \
             ose-azure-acr-image-credential-provider \
-            ose-gcp-gcr-image-credential-provider; do
+            ose-gcp-gcr-image-credential-provider
+          )
+          if [[ "$OKD_VERSION" == "4.22" ]]; then
+            capabilities+=(ose-crio-credential-provider)
+          fi
+          for capability in "${capabilities[@]}"; do
             if ! rpm -q --whatprovides "$capability" >/dev/null; then
               echo "No installed RPM provides $capability." >&2
               exit 1
@@ -323,7 +340,11 @@ jobs:
 
           workspace = Path(os.environ["GITHUB_WORKSPACE"])
           report_path = workspace / "rpm-test-report" / "rpm-versions.txt"
-          rpm_files = sorted((workspace / "rpms").rglob("*.rpm"))
+          rpm_files = sorted(
+              path
+              for path in (workspace / "rpms").rglob("*.rpm")
+              if not path.name.endswith((".src.rpm", ".nosrc.rpm"))
+          )
           binary_dirs = (
               "/bin/",
               "/sbin/",

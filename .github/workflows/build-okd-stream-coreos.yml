@@ -263,17 +263,36 @@ jobs:
 
       - name: Allow provider RPM package names in the local repo
         working-directory: openshift-os
+        env:
+          OKD_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           script=build-node-image.sh
-          old="ose-gcp-gcr-*'"
-          new="ose-gcp-gcr-*,ecr-credential-provider*,acr-credential-provider*"
-          new+=",gcr-credential-provider*'"
-          if [[ $(grep -Fo "$old" "$script" | wc -l) -ne 1 ]]; then
-            echo "Pinned OS repo package allowlist not found as expected." >&2
-            exit 1
-          fi
-          sed -i "s/ose-gcp-gcr-\\*'/${new}/" "$script"
+          python3 - "$script" "$OKD_VERSION" <<'PY'
+          from pathlib import Path
+          import sys
+
+          script = Path(sys.argv[1])
+          okd_version = sys.argv[2]
+          source = script.read_text()
+          anchor = "ose-gcp-gcr-*"
+          if source.count(anchor) != 1:
+              raise SystemExit(
+                  "Pinned OS repo package allowlist not found exactly once."
+              )
+
+          provider_packages = [
+              "ecr-credential-provider*",
+              "acr-credential-provider*",
+              "gcr-credential-provider*",
+          ]
+          if okd_version == "4.22":
+              provider_packages.append("crio-credential-provider*")
+          source = source.replace(
+              anchor, ",".join([anchor, *provider_packages]), 1
+          )
+          script.write_text(source)
+          PY
           grep -F "includepkgs=" "$script"
 
       - name: Download matching RPM artifacts
@@ -309,6 +328,14 @@ jobs:
               exit 1
             fi
           done
+          if [[ "$OKD_VERSION" == "4.22" ]] &&
+            ! find "$rpm_dir" -type f \
+              -name 'crio-credential-provider-*.rpm' -print -quit \
+              | grep -q .; then
+            echo "The selected run is missing" \
+              "crio-credential-provider RPMs." >&2
+            exit 1
+          fi
 
           createrepo_c "$rpm_dir"
           cat > "$RUNNER_TEMP/yumrepos" <<EOF
