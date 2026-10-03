@@ -2,14 +2,17 @@ name: RPM Build Reproduction
 
 on:
   workflow_dispatch:
+    inputs:
+      matrix:
+        description: JSON object with upstream, SIG, and test matrices
+        required: false
+        default: >-
+          {"upstream":[{"okd_version":"4.22","os_version":9},{"okd_version":"4.22","os_version":10},{"okd_version":"4.20","os_version":9}],"sig":[{"okd_version":"4.22","os_version":10},{"okd_version":"4.20","os_version":9}],"test":[{"okd_version":"4.22","os_version":10},{"okd_version":"4.20","os_version":9}]}
+        type: string
   workflow_call:
     inputs:
-      okd_version:
-        description: OKD version to build
-        required: true
-        type: string
-      os_version:
-        description: CentOS Stream major version to build
+      matrix:
+        description: JSON object with upstream, SIG, and test matrices
         required: true
         type: string
 
@@ -25,16 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: >-
-          ${{ fromJSON(
-            inputs.okd_version &&
-            format(
-              '[{{"okd_version":"{0}","os_version":{1}}}]',
-              inputs.okd_version,
-              inputs.os_version
-            ) ||
-            '[{"okd_version":"4.22","os_version":9},{"okd_version":"4.22","os_version":10},{"okd_version":"4.20","os_version":9}]'
-          ) }}
+        include: ${{ fromJSON(inputs.matrix).upstream }}
     container:
       image: quay.io/centos/centos:stream${{ matrix.os_version }}
     steps:
@@ -136,21 +130,7 @@ jobs:
     name: >-
       Build CentOS SIG RPMs for ${{ matrix.okd_version }}
       (EL${{ matrix.os_version }})
-    if: >-
-      ${{
-        !inputs.okd_version ||
-        (
-          inputs.okd_version == '4.20' &&
-          inputs.os_version == '9'
-        ) ||
-        (
-          inputs.os_version == '10' &&
-          contains(
-            fromJSON('["4.20","4.21","4.22"]'),
-            inputs.okd_version
-          )
-        )
-      }}
+    if: fromJSON(inputs.matrix).sig[0] != null
     runs-on: ubuntu-latest
     timeout-minutes: 240
     container:
@@ -158,16 +138,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          ${{ fromJSON(
-            inputs.okd_version &&
-            format(
-              '[{{"okd_version":"{0}","os_version":{1}}}]',
-              inputs.okd_version,
-              inputs.os_version
-            ) ||
-            '[{"okd_version":"4.22","os_version":10},{"okd_version":"4.20","os_version":9}]'
-          ) }}
+        include: ${{ fromJSON(inputs.matrix).sig }}
     steps:
       - name: Install local RPM build tools
         env:
@@ -270,35 +241,12 @@ jobs:
     name: >-
       Test installing RPMs for ${{ matrix.okd_version }}
       (EL${{ matrix.os_version }})
-    if: >-
-      ${{
-        !inputs.okd_version ||
-        (
-          inputs.okd_version == '4.20' &&
-          inputs.os_version == '9'
-        ) ||
-        (
-          inputs.os_version == '10' &&
-          contains(
-            fromJSON('["4.20","4.21","4.22"]'),
-            inputs.okd_version
-          )
-        )
-      }}
+    if: fromJSON(inputs.matrix).test[0] != null
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          ${{ fromJSON(
-            inputs.okd_version &&
-            format(
-              '[{{"okd_version":"{0}","os_version":{1}}}]',
-              inputs.okd_version,
-              inputs.os_version
-            ) ||
-            '[{"okd_version":"4.22","os_version":10},{"okd_version":"4.20","os_version":9}]'
-          ) }}
+        include: ${{ fromJSON(inputs.matrix).test }}
     container:
       image: quay.io/centos/centos:stream${{ matrix.os_version }}
     needs:

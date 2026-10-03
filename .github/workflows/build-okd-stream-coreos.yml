@@ -31,6 +31,10 @@ on:
         description: OpenShift package repository version
         required: true
         type: string
+      rpm_matrix:
+        description: JSON object with upstream, SIG, and test RPM matrices
+        required: true
+        type: string
 permissions:
   actions: read
   contents: read
@@ -63,97 +67,123 @@ jobs:
       - name: Install registry inspection tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y jq skopeo
+          sudo apt-get install --no-install-recommends -y skopeo
 
       - name: Resolve release images
         id: images
-        run: |
-          set -euo pipefail
-          inspect_image() {
-            local image_ref=$1
-            skopeo inspect "docker://${image_ref}" | jq -c '{
-                digest: .Digest,
-                stream: (.Labels["com.coreos.stream"] // ""),
-                version: (
-                  .Labels["org.opencontainers.image.version"]
-                  // .Labels["com.coreos.buildid"]
-                  // "unknown"
-                ),
-                revision: (
-                  .Labels["org.opencontainers.image.revision"]
-                  // .Labels["io.openshift.build.commit.id"]
-                  // "unknown"
-                ),
-                scos_base_digest: (
-                  .Labels["io.okd.source.scos-base.digest"] // "unknown"
-                ),
-                scos_base_version: (
-                  .Labels["io.okd.source.scos-base.version"] // "unknown"
-                ),
-                scos_base_revision: (
-                  .Labels["io.okd.source.scos-base.revision"] // "unknown"
-                ),
-                openshift_os_revision: (
-                  .Labels["io.okd.source.openshift-os.revision"]
-                  // "unknown"
-                ),
-                rpm_build_run: (
-                  .Labels["io.okd.source.rpm-build.run"] // "unknown"
-                )
-              }'
-          }
+        uses: actions/github-script@v7
+        env:
+          RELEASE_IMAGE: ${{ inputs.release_image }}
+          BASE_STREAM: ${{ inputs.base_stream }}
+        with:
+          script: |
+            const { execFileSync } = require("node:child_process");
+            const releaseImage = process.env.RELEASE_IMAGE;
+            const baseStream = process.env.BASE_STREAM;
 
-          stream_image=$(oc adm release info \
-            --image-for stream-coreos "$RELEASE_IMAGE" 2>/dev/null || true)
-          dtk_image=$(oc adm release info \
-            --image-for driver-toolkit "$RELEASE_IMAGE" 2>/dev/null || true)
-          stream_info='{}'
-          dtk_info='{}'
-          compose=false
-          skip_build=false
+            function run(command, args) {
+              return execFileSync(command, args, {
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "ignore"],
+              }).trim();
+            }
 
-          if [[ -n "$stream_image" ]]; then
-            stream_info=$(inspect_image "$stream_image")
-            stream_base=$(jq -r '.stream' <<< "$stream_info")
-            if [[ "$stream_base" != "$BASE_STREAM" ]]; then
-              echo "Release stream-coreos is for $stream_base," \
-                "not $BASE_STREAM."
-              stream_image=""
-              stream_info='{}'
-            fi
-          fi
-          if [[ -z "$stream_image" ]]; then
-            if [[ "$BASE_STREAM" == "c10s" ]]; then
-              echo "No matching c10s stream-coreos image;" \
-                "c10s has no base fallback."
-              skip_build=true
-            else
-              compose=true
-            fi
-          fi
+            function releaseImageFor(component) {
+              try {
+                return run("oc", [
+                  "adm",
+                  "release",
+                  "info",
+                  "--image-for",
+                  component,
+                  releaseImage,
+                ]);
+              } catch {
+                return "";
+              }
+            }
 
-          if [[ -n "$dtk_image" ]]; then
-            dtk_info=$(inspect_image "$dtk_image")
-            dtk_base=$(jq -r '.stream' <<< "$dtk_info")
-            if [[ -n "$dtk_base" && "$dtk_base" != "$BASE_STREAM" ]]; then
-              echo "Release driver-toolkit is for $dtk_base, not $BASE_STREAM."
-              dtk_image=""
-              dtk_info='{}'
-            elif [[ -z "$dtk_base" && -z "$stream_image" ]]; then
-              dtk_image=""
-              dtk_info='{}'
-            fi
-          fi
-          if [[ -z "$dtk_image" && -n "$stream_image" ]]; then
-            dtk_image=$stream_image
-            dtk_info=$stream_info
-          fi
-          echo "stream_image=$stream_image" >> "$GITHUB_OUTPUT"
-          echo "stream_info=$stream_info" >> "$GITHUB_OUTPUT"
-          echo "dtk_image=$dtk_image" >> "$GITHUB_OUTPUT"
-          echo "dtk_info=$dtk_info" >> "$GITHUB_OUTPUT"
-          echo "compose=$compose" >> "$GITHUB_OUTPUT"
-          echo "skip_build=$skip_build" >> "$GITHUB_OUTPUT"
+            function inspectImage(imageRef) {
+              const image = JSON.parse(
+                run("skopeo", ["inspect", `docker://${imageRef}`])
+              );
+              const labels = image.Labels ?? {};
+              return {
+                digest: image.Digest,
+                stream: labels["com.coreos.stream"] ?? "",
+                version:
+                  labels["org.opencontainers.image.version"] ??
+                  labels["com.coreos.buildid"] ??
+                  "unknown",
+                revision:
+                  labels["org.opencontainers.image.revision"] ??
+                  labels["io.openshift.build.commit.id"] ??
+                  "unknown",
+                scos_base_digest:
+                  labels["io.okd.source.scos-base.digest"] ?? "unknown",
+                scos_base_version:
+                  labels["io.okd.source.scos-base.version"] ?? "unknown",
+                scos_base_revision:
+                  labels["io.okd.source.scos-base.revision"] ?? "unknown",
+                openshift_os_revision:
+                  labels["io.okd.source.openshift-os.revision"] ?? "unknown",
+                rpm_build_run:
+                  labels["io.okd.source.rpm-build.run"] ?? "unknown",
+              };
+            }
+
+            let streamImage = releaseImageFor("stream-coreos");
+            let dtkImage = releaseImageFor("driver-toolkit");
+            let streamInfo = {};
+            let dtkInfo = {};
+            let compose = false;
+            let skipBuild = false;
+
+            if (streamImage) {
+              streamInfo = inspectImage(streamImage);
+              if (streamInfo.stream !== baseStream) {
+                core.info(
+                  `Release stream-coreos is for ${streamInfo.stream}, not ${baseStream}.`
+                );
+                streamImage = "";
+                streamInfo = {};
+              }
+            }
+            if (!streamImage) {
+              if (baseStream === "c10s") {
+                core.info(
+                  "No matching c10s stream-coreos image; c10s has no base fallback."
+                );
+                skipBuild = true;
+              } else {
+                compose = true;
+              }
+            }
+
+            if (dtkImage) {
+              dtkInfo = inspectImage(dtkImage);
+              if (dtkInfo.stream && dtkInfo.stream !== baseStream) {
+                core.info(
+                  `Release driver-toolkit is for ${dtkInfo.stream}, not ${baseStream}.`
+                );
+                dtkImage = "";
+                dtkInfo = {};
+              } else if (!dtkInfo.stream && !streamImage) {
+                dtkImage = "";
+                dtkInfo = {};
+              }
+            }
+            if (!dtkImage && streamImage) {
+              dtkImage = streamImage;
+              dtkInfo = streamInfo;
+            }
+
+            core.setOutput("stream_image", streamImage);
+            core.setOutput("stream_info", JSON.stringify(streamInfo));
+            core.setOutput("dtk_image", dtkImage);
+            core.setOutput("dtk_info", JSON.stringify(dtkInfo));
+            core.setOutput("compose", String(compose));
+            core.setOutput("skip_build", String(skipBuild));
 
   build-rpms:
     needs: resolve-source
@@ -163,8 +193,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/rpm-build.yml
     with:
-      okd_version: ${{ inputs.version }}
-      os_version: ${{ inputs.os_major }}
+      matrix: ${{ inputs.rpm_matrix }}
 
   compose-base-image:
     needs:
