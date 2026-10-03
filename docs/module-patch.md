@@ -9,9 +9,11 @@ contract without probing fallback branches or applying compatibility patches.
 ## Branches and patch identity
 
 `rpms/mirror-plan.json` describes exact, fallback, and shared source branches.
-An exact target branch is used directly. A missing exact branch uses a mirror
-named `rpms/<project>-el<major>-<okd-version>`. A shared package without an OKD
-release branch uses `rpms/<project>-el<major>`, such as `rpms/conmon-rs-el9`.
+An exact target branch is used directly. A configured shared branch already
+targeting the requested EL is also used directly when no exact branch exists.
+For example, EL9 conmon-rs uses upstream `c9s-sig-cloud` for both 4.20 and 4.22;
+it does not need a mirror or an identity commit. Compatibility fallback sources
+use mirrors named `rpms/<project>-el<major>-<okd-version>`.
 
 The mirror retains the selected upstream branch's complete history, separate
 from `main`. The first commit after upstream has the subject
@@ -71,7 +73,7 @@ This permits rebased patches while retaining upstream commit IDs. A signing
 failure leaves the mirror unchanged. Another writer causes the lease to reject
 publication; rerun preparation against the new state. The temporary branch is
 removed on success or failure. Concurrency is scoped to the mirror branch,
-with queued calls for shared packages.
+with queued calls for that branch. Native shared sources skip mirror sync.
 
 ## CRI-O EL9 example
 

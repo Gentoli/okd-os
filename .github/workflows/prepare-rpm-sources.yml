@@ -58,24 +58,27 @@ jobs:
             }
             if (!rules.projects.includes(project)) throw new Error(`Unknown RPM project: ${project}`);
             const exact = format(rules.branch_patterns[project]?.[el]);
+            const shared = format(rules.shared_branch_patterns[project]?.[el]);
             let source;
             let mirror = null;
             if (exact && exists(exact)) {
               source = { url, branch: exact };
+            } else if (shared) {
+              if (!exists(shared)) throw new Error(`Missing upstream source branch: ${shared}`);
+              source = { url, branch: shared };
             } else {
-              const shared = format(rules.shared_branch_patterns[project]?.[el]);
-              const base = shared ?? format(rules.fallback_branch_patterns[project]?.[el]);
+              const base = format(rules.fallback_branch_patterns[project]?.[el]);
               if (!base) throw new Error(`No fallback source for ${project} OKD ${version} EL${el}`);
               if (!exists(base)) throw new Error(`Missing upstream source branch: ${base}`);
-              const target = shared ? `el${el}` : `el${el}-okd${version}`;
-              const branch = `rpms/${project}-el${el}${shared ? "" : `-${version}`}`;
+              const target = `el${el}-okd${version}`;
+              const branch = `rpms/${project}-el${el}-${version}`;
               mirror = {
                 project,
                 source_url: url,
                 source_branch: base,
                 target_branch: branch,
                 target_el: el,
-                target_okd_version: shared ? null : version,
+                target_okd_version: version,
                 patch_id: `${project}__${base}__${target}`,
               };
               source = { url: `https://github.com/${process.env.GITHUB_REPOSITORY}.git`, branch };
