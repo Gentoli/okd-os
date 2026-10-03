@@ -31,8 +31,8 @@ on:
         description: OpenShift package repository version
         required: true
         type: string
-      rpm_matrix:
-        description: JSON object with upstream, SIG, and test RPM matrices
+      rpm_targets:
+        description: JSON array of RPM build targets
         required: true
         type: string
 permissions:
@@ -191,12 +191,19 @@ jobs:
   build-rpms:
     needs: resolve-source
     if: needs.resolve-source.outputs.compose == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.rpm_targets) }}
     permissions:
       actions: read
       contents: read
     uses: ./.github/workflows/rpm-build.yml
     with:
-      matrix: ${{ inputs.rpm_matrix }}
+      okd_version: ${{ matrix.okd_version }}
+      os_version: ${{ matrix.os_version }}
+      build_sig: ${{ matrix.build_sig }}
+      run_test: ${{ matrix.run_test }}
 
   compose-base-image:
     needs:

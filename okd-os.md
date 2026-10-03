@@ -242,9 +242,9 @@ while testing.
 The workflow publishes `stream-coreos:<version>-<stream>` and
 `driver-toolkit:<version>-<stream>`. Each image records its release payload,
 source image version/digest/revision, and workflow revision in OCI labels. The
-RPM workflow accepts a caller-supplied JSON object with separate upstream, SIG,
-and test matrices. The image workflow supplies only the version/EL pair
-required by a fallback compose; standalone dispatch retains the focused matrix.
+RPM workflow accepts one version/EL target and optional SIG-build and
+install-test flags. The image workflow owns the `strategy.matrix` and passes
+each target to the reusable RPM workflow; standalone dispatch runs one target.
 
 The provider RPMs are correctly named `ecr-credential-provider`,
 `acr-credential-provider`, and `gcr-credential-provider`; their RPM metadata

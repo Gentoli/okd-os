@@ -2,8 +2,12 @@ name: Scan OKD releases and build images
 
 on:
   push:
-    branches:
-      - main
+    paths:
+      - .github/workflows/build-okd-stream-coreos.yml
+      - .github/workflows/rpm-build.yml
+      - .github/workflows/scan-okd-releases.yml
+      - Dockerfile
+      - Dockerfile.dtk
   schedule:
     - cron: "17 6 1,15 * *"
   workflow_dispatch:
@@ -104,26 +108,16 @@ jobs:
                 release_commit: commit.sha,
                 base,
                 os_major: base.match(/^c(\d+)s$/)[1],
-                rpm_matrix: JSON.stringify({
-                  upstream: [{
+                rpm_targets: JSON.stringify([{
                     okd_version: version,
-                    os_version: Number(base.match(/^c(\d+)s$/)[1]),
-                  }],
-                  sig:
-                    base === "c10s" || version === "4.20"
-                      ? [{
-                          okd_version: version,
-                          os_version: Number(base.match(/^c(\d+)s$/)[1]),
-                        }]
-                      : [],
-                  test:
-                    base === "c10s" || version === "4.20"
-                      ? [{
-                          okd_version: version,
-                          os_version: Number(base.match(/^c(\d+)s$/)[1]),
-                        }]
-                      : [],
-                }),
+                    os_version: base.match(/^c(\d+)s$/)[1],
+                    build_sig:
+                      (version === "4.22" && base === "c10s") ||
+                      (version === "4.20" && base === "c9s"),
+                    run_test:
+                      (version === "4.22" && base === "c10s") ||
+                      (version === "4.20" && base === "c9s"),
+                  }]),
                 repo_version:
                   base === "c10s"
                     ? "10.0"
@@ -155,5 +149,5 @@ jobs:
       base_stream: ${{ matrix.base }}
       os_major: ${{ matrix.os_major }}
       repo_version: ${{ matrix.repo_version }}
-      rpm_matrix: ${{ matrix.rpm_matrix }}
+      rpm_targets: ${{ matrix.rpm_targets }}
     secrets: inherit
