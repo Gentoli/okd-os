@@ -55,7 +55,7 @@ flowchart TD
   H --> I[rpm-build: one call for manual target]
 ```
 
-Each preparation call optionally invokes `sync-rpm-mirror`, once for its
+Each preparation call optionally invokes `sync-repo-mirror`, once for its
 package target. Neither reusable source workflow owns another package or
 release matrix. Both use only `workflow_call`.
 
@@ -120,7 +120,7 @@ than reusable workflow outputs that can overwrite one another.
 
 ### 3. Implement mirror sync as one job
 
-Add `sync-rpm-mirror.yml`, accepting one mirror request rather than an array
+Add `sync-repo-mirror.yml`, accepting one mirror request rather than an array
 whose length must be checked repeatedly. Grant `contents: write` and
 `copilot-requests: write`. Use branch-specific concurrency to serialize writes
 to the same mirror while unrelated packages proceed.

@@ -1,10 +1,10 @@
-name: Sync RPM mirror
+name: Sync source mirror
 
 on:
   workflow_call:
     inputs:
       mirror:
-        description: One branch-based package mirror request
+        description: One branch-based source mirror request
         required: true
         type: string
 
@@ -13,7 +13,7 @@ permissions:
   copilot-requests: write
 
 concurrency:
-  group: rpm-mirror-${{ fromJSON(inputs.mirror).target_branch }}
+  group: source-mirror-${{ fromJSON(inputs.mirror).target_branch }}
   cancel-in-progress: false
   queue: max
 
@@ -38,19 +38,64 @@ jobs:
             const fs = require("node:fs");
             const path = require("node:path");
             const mirror = JSON.parse(process.env.MIRROR);
+            function repositoryPath(value, name, optional = false) {
+              if ((value === undefined || value === null || value === "") && optional) {
+                return "";
+              }
+              if (typeof value !== "string" || !value || value.includes("\\") ||
+                  value.startsWith("/") || value.split("/").some((part) =>
+                    !part || part === "." || part === "..")) {
+                throw new Error(`Mirror request has an invalid ${name} path.`);
+              }
+              return value;
+            }
+            for (const key of ["project", "source_url", "source_branch", "target_branch"]) {
+              if (typeof mirror[key] !== "string" || !mirror[key]) {
+                throw new Error(`Mirror request is missing ${key}.`);
+              }
+            }
+            mirror.identity_file = repositoryPath(mirror.identity_file, "identity_file");
+            mirror.prompt_file = repositoryPath(mirror.prompt_file, "prompt_file");
+            mirror.recipe_file = repositoryPath(mirror.recipe_file, "recipe_file", true);
+            mirror.seed_patch = repositoryPath(mirror.seed_patch, "seed_patch", true);
+            if (mirror.target_branch.includes("..") ||
+                !/^[A-Za-z0-9._/-]+$/.test(mirror.target_branch)) {
+              throw new Error("Mirror request has an invalid target_branch.");
+            }
+            if (mirror.reference_branch &&
+                (mirror.reference_branch.includes("..") ||
+                 !/^[A-Za-z0-9._/-]+$/.test(mirror.reference_branch))) {
+              throw new Error("Mirror request has an invalid reference_branch.");
+            }
             const git = (args) => execFileSync("git", args, {
               encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
             }).trim();
             const mirrorUrl = `https://github.com/${process.env.GITHUB_REPOSITORY}.git`;
-            git(["remote", "add", "rpm-upstream", mirror.source_url]);
-            git(["remote", "add", "rpm-mirror", mirrorUrl]);
-            const sourceRef = "refs/remotes/rpm-upstream/base";
-            const targetRef = "refs/remotes/rpm-mirror/target";
-            git(["fetch", "--no-tags", "rpm-upstream", `refs/heads/${mirror.source_branch}:${sourceRef}`]);
+            git(["remote", "add", "mirror-upstream", mirror.source_url]);
+            git(["remote", "add", "mirror-target", mirrorUrl]);
+            let sourceBranch = mirror.source_branch;
+            if (sourceBranch === "HEAD") {
+              const symbolicHead = git(["ls-remote", "--symref", "mirror-upstream", "HEAD"]);
+              const match = symbolicHead.match(/^ref:\s+refs\/heads\/([^\s]+)\s+HEAD$/m);
+              if (!match) throw new Error(`Could not resolve the default branch for ${mirror.project}.`);
+              sourceBranch = match[1];
+            }
+            if (sourceBranch.includes("..") ||
+                !/^[A-Za-z0-9._/-]+$/.test(sourceBranch)) {
+              throw new Error("Mirror request has an invalid source_branch.");
+            }
+            git(["check-ref-format", "--branch", sourceBranch]);
+            git(["check-ref-format", "--branch", mirror.target_branch]);
+            if (mirror.reference_branch) {
+              git(["check-ref-format", "--branch", mirror.reference_branch]);
+            }
+            const sourceRef = "refs/remotes/mirror-upstream/base";
+            const targetRef = "refs/remotes/mirror-target/target";
+            git(["fetch", "--no-tags", "mirror-upstream", `refs/heads/${sourceBranch}:${sourceRef}`]);
             let oldHead = "";
             try {
-              git(["ls-remote", "--exit-code", "--heads", "rpm-mirror", `refs/heads/${mirror.target_branch}`]);
-              git(["fetch", "--no-tags", "rpm-mirror", `refs/heads/${mirror.target_branch}:${targetRef}`]);
+              git(["ls-remote", "--exit-code", "--heads", "mirror-target", `refs/heads/${mirror.target_branch}`]);
+              git(["fetch", "--no-tags", "mirror-target", `refs/heads/${mirror.target_branch}:${targetRef}`]);
               oldHead = git(["rev-parse", targetRef]);
             } catch (error) {
               if (error.status !== 2) throw error;
@@ -59,25 +104,49 @@ jobs:
               try {
                 git(["merge-base", "--is-ancestor", sourceRef, targetRef]);
                 core.setOutput("update", "false");
-                core.info(`${mirror.target_branch} already incorporates ${mirror.source_branch}`);
+                core.info(`${mirror.target_branch} already incorporates ${sourceBranch}`);
                 return;
               } catch (error) {
                 if (error.status !== 1) throw error;
               }
             }
-            git(["config", "user.name", "RPM Mirror Maintainer"]);
-            git(["config", "user.email", "rpm-mirror-maintainer@users.noreply.github.com"]);
+            const referenceRef = mirror.reference_branch
+              ? "refs/remotes/mirror-upstream/reference"
+              : null;
+            if (referenceRef) {
+              git(["fetch", "--no-tags", "mirror-upstream",
+                `refs/heads/${mirror.reference_branch}:${referenceRef}`]);
+            }
+            const sourceId = sourceBranch.replace(/[^A-Za-z0-9._-]+/g, "-");
+            const patchId = mirror.patch_id ||
+              `${mirror.project.replace(/[^A-Za-z0-9]+/g, "-")}__${sourceId}__` +
+              mirror.target_branch.replace(/[^A-Za-z0-9._-]+/g, "-");
+            if (!/^[A-Za-z0-9._-]+$/.test(patchId)) {
+              throw new Error("Mirror request has an invalid patch_id.");
+            }
+            mirror.patch_id = patchId;
+            mirror.source_branch = sourceBranch;
+            git(["config", "user.name", "Source Mirror Maintainer"]);
+            git(["config", "user.email", "source-mirror-maintainer@users.noreply.github.com"]);
             git(["config", "commit.gpgsign", "false"]);
-            const worktree = path.join(process.env.RUNNER_TEMP, "rpm-mirror");
+            const worktree = path.join(process.env.RUNNER_TEMP, "source-mirror");
             git(["worktree", "add", "--detach", worktree, oldHead ? targetRef : sourceRef]);
             const mirrorContext = {
-              ...mirror, source_ref: sourceRef, target_ref: oldHead ? targetRef : null,
-              worktree, identity_file: ".rpm-patch.json",
+              ...mirror,
+              source_ref: sourceRef,
+              target_ref: oldHead ? targetRef : null,
+              reference_ref: referenceRef,
+              worktree,
+              patch_id: patchId,
             };
-            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, "rpm-mirror-context.json"), JSON.stringify(mirrorContext, null, 2) + "\n");
+            fs.writeFileSync(
+              path.join(process.env.RUNNER_TEMP, "source-mirror-context.json"),
+              JSON.stringify(mirrorContext, null, 2) + "\n"
+            );
             core.setOutput("worktree", worktree);
             core.setOutput("old_head", oldHead);
-            core.setOutput("staging_branch", `rpm-publish/${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-${mirror.patch_id}`);
+            const safeTarget = mirror.target_branch.replace(/[^A-Za-z0-9._-]+/g, "-");
+            core.setOutput("staging_branch", `source-publish/${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-${safeTarget}`);
             core.setOutput("update", "true");
 
       - name: Set up Node.js for Copilot CLI
@@ -102,10 +171,27 @@ jobs:
             const { spawn } = require("node:child_process");
             const fs = require("node:fs");
             const path = require("node:path");
-            const read = (file) => fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE, file), "utf8");
-            const prompt = read(".github/prompts/rpm-mirror-maintenance.md") +
-              "\n\nRecipe:\n" + read("docs/module-patch.md") +
-              "\n\nRun context:\n" + fs.readFileSync(`${process.env.RUNNER_TEMP}/rpm-mirror-context.json`, "utf8");
+            const workspace = fs.realpathSync(process.env.GITHUB_WORKSPACE);
+            const read = (file) => {
+              const resolved = fs.realpathSync(path.resolve(workspace, file));
+              const relative = path.relative(workspace, resolved);
+              if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) ||
+                  path.isAbsolute(relative)) {
+                throw new Error(`Mirror request path escapes the workflow repository: ${file}`);
+              }
+              return fs.readFileSync(resolved, "utf8");
+            };
+            const runContext = JSON.parse(
+              fs.readFileSync(`${process.env.RUNNER_TEMP}/source-mirror-context.json`, "utf8")
+            );
+            const recipe = runContext.recipe_file
+              ? `\n\nRecipe:\n${read(runContext.recipe_file)}`
+              : "";
+            const seedPatch = runContext.seed_patch
+              ? `\n\nBootstrap patch:\n${runContext.seed_patch}`
+              : "";
+            const prompt = read(runContext.prompt_file) + recipe + seedPatch +
+              "\n\nRun context:\n" + JSON.stringify(runContext, null, 2);
             let output = "";
             await new Promise((resolve, reject) => {
               const child = spawn("copilot", ["-p", prompt, "--model", "gpt-6-luna",
@@ -147,7 +233,7 @@ jobs:
             const auth = Buffer.from(`x-access-token:${process.env.GITHUB_TOKEN}`).toString("base64");
             core.setSecret(auth);
             git(["-c", `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`,
-              "push", "rpm-mirror", `${base}:refs/heads/${process.env.STAGING_BRANCH}`]);
+              "push", "mirror-target", `${base}:refs/heads/${process.env.STAGING_BRANCH}`]);
             core.setOutput("revision", `${base}..${head}`);
 
       - name: Sign agent-created patch commits
@@ -181,9 +267,9 @@ jobs:
               `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`, ...args], {
               cwd: process.env.WORKTREE, stdio: ["ignore", "pipe", "pipe"],
             });
-            git(["fetch", "--no-tags", "rpm-mirror", `refs/heads/${process.env.STAGING_BRANCH}`]);
+            git(["fetch", "--no-tags", "mirror-target", `refs/heads/${process.env.STAGING_BRANCH}`]);
             git(["push", `--force-with-lease=refs/heads/${mirror.target_branch}:${process.env.OLD_HEAD}`,
-              "rpm-mirror", `${process.env.SIGNED_HEAD}:refs/heads/${mirror.target_branch}`]);
+              "mirror-target", `${process.env.SIGNED_HEAD}:refs/heads/${mirror.target_branch}`]);
             core.info(`Published ${mirror.target_branch} at ${process.env.SIGNED_HEAD}`);
 
       - name: Remove temporary publishing branch

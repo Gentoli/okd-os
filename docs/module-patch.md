@@ -53,11 +53,18 @@ freshness. Current mirrors skip the agent and publication steps.
    identity commit. Report all resulting patch-stack commit IDs, including the
    recreated marker. The agent must not push; workflow steps sign and publish.
 
-The package-agnostic instruction is in
-`.github/prompts/rpm-mirror-maintenance.md`. Sync uses one job with
-`contents: write`, `copilot-requests: write`, inline `github-script`
-preparation, and Copilot CLI with `--model gpt-6-luna`. There is no post-agent
-content validation. The organization policy must permit
+`.github/workflows/sync-repo-mirror.yml` is the shared branch-mirror engine.
+Each mirror request selects its identity file, maintenance prompt, optional
+recipe, and any bootstrap/reference refs; the workflow validates repository-
+relative prompt paths and then uses the same ancestry, signing, and
+lease-publication flow. RPM requests select
+`.github/prompts/rpm-mirror-maintenance.md`, `docs/module-patch.md`, and
+`.rpm-patch.json`; OS source mirrors use their own prompt and marker. The RPM
+instruction remains package agnostic within RPM compatibility work.
+
+Sync uses one job with `contents: write`, `copilot-requests: write`, inline
+`github-script` preparation, and Copilot CLI with `--model gpt-6-luna`. There
+is no post-agent content validation. The organization policy must permit
 [Copilot CLI requests in Actions](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions).
 
 ## Signed publication
@@ -129,7 +136,9 @@ With Python 3, PyYAML, Node.js, and Git installed, run
 `python -m unittest discover -s .github/tests -v`. The tests execute the inline
 workflow scripts against local repositories, exercising source selection,
 upstream ancestry, patch replay, publication leases, and artifact collection.
-They do not make Copilot requests or publish remote branches.
+`test_os_source_mirror.py` also verifies default-branch resolution, OS mirror
+requests, the EL9 reference branch, and fallback-only sync gating. These tests
+do not make Copilot requests or publish remote branches.
 
 Actionlint 1.7.12 does not recognize the documented
 [`copilot-requests` permission](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions)

@@ -234,10 +234,31 @@ jobs:
       sig_matrix: ${{ inputs.sig_matrix }}
       run_test: ${{ inputs.run_test }}
 
+  sync-openshift-os-source:
+    needs: resolve-source
+    if: needs.resolve-source.outputs.compose == 'true'
+    permissions:
+      contents: write
+      copilot-requests: write
+    uses: ./.github/workflows/sync-repo-mirror.yml
+    with:
+      mirror: >-
+        {
+          "project": "openshift/os",
+          "source_url": "https://github.com/openshift/os.git",
+          "source_branch": "release-${{ inputs.version }}",
+          "target_branch": "okd/os-${{ inputs.version }}",
+          "target_version": "${{ inputs.version }}",
+          "reference_branch": "${{ inputs.version == '4.22' && 'release-4.20' || '' }}",
+          "identity_file": ".okd-source-patch.json",
+          "prompt_file": ".github/prompts/os-source-mirror-maintenance.md"
+        }
+
   compose-base-image:
     needs:
       - resolve-source
       - build-rpms
+      - sync-openshift-os-source
     if: needs.resolve-source.outputs.compose == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -255,8 +276,7 @@ jobs:
       - name: Checkout matching openshift/os source
         uses: actions/checkout@v4
         with:
-          repository: openshift/os
-          ref: release-${{ inputs.version }}
+          ref: okd/os-${{ inputs.version }}
           path: openshift-os
           persist-credentials: false
 
@@ -266,7 +286,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y \
             createrepo-c podman skopeo
 
-      - name: Allow provider RPM package names in the local repo
+      - name: Allow local runtime and provider RPM packages
         working-directory: openshift-os
         env:
           OKD_VERSION: ${{ inputs.version }}
@@ -293,8 +313,13 @@ jobs:
           ]
           if okd_version == "4.22":
               provider_packages.append("crio-credential-provider*")
+          runtime_packages = [
+              "cri-o*",
+              "cri-tools*",
+              "conmon-rs*",
+          ]
           source = source.replace(
-              anchor, ",".join([anchor, *provider_packages]), 1
+              anchor, ",".join([anchor, *provider_packages, *runtime_packages]), 1
           )
           script.write_text(source)
           PY

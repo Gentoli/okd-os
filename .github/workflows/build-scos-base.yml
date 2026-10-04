@@ -6,14 +6,10 @@ on:
       - main
     paths:
       - .github/workflows/build-scos-base.yml
+      - .github/workflows/sync-repo-mirror.yml
+      - .github/prompts/os-source-mirror-maintenance.md
       - os/base/**
   workflow_dispatch:
-    inputs:
-      config_ref:
-        description: Branch, tag, or commit of coreos/rhel-coreos-config
-        required: true
-        default: HEAD
-        type: string
 
 permissions:
   contents: read
@@ -24,8 +20,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  sync-coreos-source:
+    permissions:
+      contents: write
+      copilot-requests: write
+    uses: ./.github/workflows/sync-repo-mirror.yml
+    with:
+      mirror: >-
+        {
+          "project": "coreos/rhel-coreos-config",
+          "source_url": "https://github.com/coreos/rhel-coreos-config.git",
+          "source_branch": "HEAD",
+          "target_branch": "coreos/c9s",
+          "target_version": null,
+          "identity_file": ".okd-source-patch.json",
+          "prompt_file": ".github/prompts/os-source-mirror-maintenance.md",
+          "seed_patch": "os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch"
+        }
+
   build-and-push:
     name: Build ${{ matrix.stream }} base
+    needs: sync-coreos-source
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -69,26 +84,18 @@ jobs:
       - name: Checkout CoreOS config
         uses: actions/checkout@v4
         with:
-          repository: coreos/rhel-coreos-config
-          ref: ${{ inputs.config_ref != 'HEAD' && inputs.config_ref || '' }}
+          repository: Gentoli/okd-os
+          ref: coreos/c9s
           path: os/base/${{ matrix.stream }}/source
           submodules: recursive
           persist-credentials: false
 
-      - name: Apply local SCOS patches
+      - name: Record mirrored CoreOS config revision
         env:
           STREAM: ${{ matrix.stream }}
         run: |
           set -euo pipefail
           config_path="$GITHUB_WORKSPACE/os/base/${STREAM}/source"
-          patch_dir="$GITHUB_WORKSPACE/os/base/${STREAM}/patches"
-          shopt -s nullglob
-          patches=("$patch_dir"/*.patch)
-          for patch in "${patches[@]}"; do
-            echo "Applying ${patch##*/}"
-            git -C "$config_path" apply "$patch"
-          done
-          git -C "$config_path" diff --check
           config_revision=$(git -C "$config_path" rev-parse HEAD)
           echo "COREOS_CONFIG_REVISION=$config_revision" >> "$GITHUB_ENV"
 

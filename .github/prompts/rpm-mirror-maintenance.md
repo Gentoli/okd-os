@@ -2,8 +2,9 @@
 
 Follow the attached generic recipe in `docs/module-patch.md` and the JSON run
 context. All package and branch names come from that context. Work in the
-supplied worktree. The workflow has configured `rpm-upstream` and `rpm-mirror`,
-fetched `source_ref`, and fetched `target_ref` if the mirror exists.
+supplied worktree. The workflow has configured the `mirror-upstream` and
+`mirror-target` remotes, fetched `source_ref`, and fetched `target_ref` if the
+mirror exists.
 
 1. Inspect the package repository, current refs, packaging history, `SPECS`,
    `SOURCES`, and the lookaside `sources` manifest. Do not assume the spec is the

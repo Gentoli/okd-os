@@ -80,6 +80,9 @@ jobs:
                 target_el: el,
                 target_okd_version: version,
                 patch_id: `${project}__${base}__${target}`,
+                identity_file: ".rpm-patch.json",
+                prompt_file: ".github/prompts/rpm-mirror-maintenance.md",
+                recipe_file: "docs/module-patch.md",
               };
               source = { url: `https://github.com/${process.env.GITHUB_REPOSITORY}.git`, branch };
             }
@@ -92,7 +95,7 @@ jobs:
     permissions:
       contents: write
       copilot-requests: write
-    uses: ./.github/workflows/sync-rpm-mirror.yml
+    uses: ./.github/workflows/sync-repo-mirror.yml
     with:
       mirror: ${{ needs.select.outputs.mirror }}
 

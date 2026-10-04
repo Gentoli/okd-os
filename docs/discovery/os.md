@@ -146,13 +146,19 @@ does not claim to be a clean upstream build.
   reproducible build.
 - The corresponding compatibility patch is
   [`0001-drop-unresolvable-fwupd-plugin.patch`](../../os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch).
-  [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml) applies
-  every patch under the selected stream's `patches` directory and builds the
-  `c9s` variant with COSA.
-  Pushes run on `main` when the workflow or base files change. Workflow
-  dispatch accepts an upstream config ref (default `HEAD`) and publishes
-  `scos-base:c9s` as the SCOS OCI base and `scos-base:c9s-vm` as the QEMU VM
-  image containing the disk. The SCOS OCI base includes source revision labels.
+  It is retained as a one-time bootstrap input until the first CI mirror
+  publication. [`build-scos-base.yml`](../../.github/workflows/build-scos-base.yml)
+  calls the shared [`sync-repo-mirror.yml`](../../.github/workflows/sync-repo-mirror.yml)
+  workflow before each base build. That workflow checks the upstream default
+  branch against `Gentoli/okd-os:coreos/c9s`, applies the seed patch only when
+  creating the branch, and replays its compatibility commit on later upstream
+  updates. The builder checks out `coreos/c9s`; it no longer applies local
+  patch files. Workflow dispatch no longer accepts an upstream `config_ref`.
+  After the mirror branch and first base build are verified, the seed patch can
+  be deleted. Pushes run on `main` when the workflow or base files change. The
+  workflow publishes `scos-base:c9s` as the SCOS OCI base and
+  `scos-base:c9s-vm` as the QEMU VM image containing the disk. The SCOS OCI
+  base includes source revision labels.
 - `docker/login-action` provides the GHCR credentials used when publishing.
   The action's post-job cleanup logs out at the end of the job.
 - The COSA job container requires a runner with `/dev/kvm`; the workflow fails

@@ -142,7 +142,7 @@ class MirrorWorkflows(unittest.TestCase):
 
     def prepare(self, request):
         self.env["MIRROR"] = json.dumps(request)
-        result = self.run_script(script("sync-rpm-mirror.yml", "sync", "prepare"))
+        result = self.run_script(script("sync-repo-mirror.yml", "sync", "prepare"))
         self.assertNotIn("error", result)
         return result
 
@@ -169,6 +169,9 @@ class MirrorWorkflows(unittest.TestCase):
         request = self.request()
         self.assertEqual(request["patch_id"], "cri-o__c10s-sig-cloud-okd-4.22__el9-okd4.22")
         self.assertEqual(request["target_branch"], "rpms/cri-o-el9-4.22")
+        self.assertEqual(request["identity_file"], ".rpm-patch.json")
+        self.assertEqual(request["prompt_file"], ".github/prompts/rpm-mirror-maintenance.md")
+        self.assertEqual(request["recipe_file"], "docs/module-patch.md")
         self.assertFalse(any("sha" in key for key in request))
 
     def test_native_shared_el9_source_is_direct_for_both_releases(self):
@@ -222,7 +225,10 @@ class MirrorWorkflows(unittest.TestCase):
         self.assertEqual(result["update"], "true")
         self.assertEqual(result["old_head"], "")
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=result["worktree"]), self.base)
-        self.assertEqual(self.git("show-ref", cwd=self.remote, check=False).returncode, 1)
+        self.assertEqual(
+            self.git("--git-dir", str(self.remote), "show-ref", check=False).returncode,
+            1,
+        )
 
     def test_current_mirror_skips_update_without_sha_metadata(self):
         request = self.request()
@@ -231,9 +237,12 @@ class MirrorWorkflows(unittest.TestCase):
 
     def agent_report(self, output):
         self.env.update({"GITHUB_WORKSPACE": str(ROOT), "WORKTREE": str(self.work)})
-        (self.runner_temp / "rpm-mirror-context.json").write_text("{}")
+        (self.runner_temp / "source-mirror-context.json").write_text(json.dumps({
+            "prompt_file": ".github/prompts/rpm-mirror-maintenance.md",
+            "recipe_file": "docs/module-patch.md",
+        }))
         # Split the report as streamed CLI output, without making an agent request.
-        return self.run_script(script("sync-rpm-mirror.yml", "sync", "agent"),
+        return self.run_script(script("sync-repo-mirror.yml", "sync", "agent"),
                                agent_output=[output[:20], output[20:]])
 
     def test_agent_reports_preserve_order_with_literal_optional_brackets(self):
@@ -267,23 +276,35 @@ class MirrorWorkflows(unittest.TestCase):
         prepared = self.prepare(request)["outputs"]
         self.assertEqual(prepared["update"], "true")
         worktree = prepared["worktree"]
-        self.git("checkout", "--detach", "refs/remotes/rpm-upstream/base", cwd=worktree)
+        self.git("checkout", "--detach", "refs/remotes/mirror-upstream/base", cwd=worktree)
         self.git("cherry-pick", f"{self.base}..{old_head}", cwd=worktree)
         self.assertEqual(self.git("merge-base", new_base, "HEAD", cwd=worktree), new_base)
         self.env.update({"WORKTREE": worktree, "OLD_HEAD": old_head,
                          "STAGING_BRANCH": prepared["staging_branch"],
                          "COMMITS": self.git("rev-list", "--reverse", f"{new_base}..HEAD", cwd=worktree).replace("\n", " ")})
-        stage = self.run_script(script("sync-rpm-mirror.yml", "sync", "stage"))
+        stage = self.run_script(script("sync-repo-mirror.yml", "sync", "stage"))
         self.assertNotIn("error", stage)
-        self.assertEqual(self.git("rev-parse", f"refs/heads/{prepared['staging_branch']}", cwd=self.remote), new_base)
+        self.assertEqual(
+            self.git("--git-dir", str(self.remote), "rev-parse",
+                     f"refs/heads/{prepared['staging_branch']}"),
+            new_base,
+        )
         # A partially signed temporary branch must not affect the target mirror.
-        self.assertEqual(self.git("rev-parse", f"refs/heads/{request['target_branch']}", cwd=self.remote), old_head)
+        self.assertEqual(
+            self.git("--git-dir", str(self.remote), "rev-parse",
+                     f"refs/heads/{request['target_branch']}"),
+            old_head,
+        )
         head = self.git("rev-parse", "HEAD", cwd=worktree)
-        self.git("push", "rpm-mirror", f"HEAD:refs/heads/{prepared['staging_branch']}", cwd=worktree)
+        self.git("push", "mirror-target", f"HEAD:refs/heads/{prepared['staging_branch']}", cwd=worktree)
         self.env["SIGNED_HEAD"] = head  # Simulate the signer's output; no API call.
-        publish_source = next(s["with"]["script"] for s in workflow("sync-rpm-mirror.yml")["jobs"]["sync"]["steps"] if s.get("name") == "Publish signed mirror with a lease")
+        publish_source = next(s["with"]["script"] for s in workflow("sync-repo-mirror.yml")["jobs"]["sync"]["steps"] if s.get("name") == "Publish signed mirror with a lease")
         self.assertNotIn("error", self.run_script(publish_source))
-        self.assertEqual(self.git("rev-parse", f"refs/heads/{request['target_branch']}", cwd=self.remote), head)
+        self.assertEqual(
+            self.git("--git-dir", str(self.remote), "rev-parse",
+                     f"refs/heads/{request['target_branch']}"),
+            head,
+        )
         # Another writer advances the mirror before a stale publisher retries.
         self.git("fetch", str(self.remote), f"refs/heads/{request['target_branch']}", cwd=existing)
         self.git("checkout", "--detach", "FETCH_HEAD", cwd=existing)
@@ -292,7 +313,11 @@ class MirrorWorkflows(unittest.TestCase):
         other_head = self.git("rev-parse", "HEAD", cwd=existing)
         self.git("push", str(self.remote), f"HEAD:refs/heads/{request['target_branch']}", cwd=existing)
         self.assertIn("error", self.run_script(publish_source))
-        self.assertEqual(self.git("rev-parse", f"refs/heads/{request['target_branch']}", cwd=self.remote), other_head)
+        self.assertEqual(
+            self.git("--git-dir", str(self.remote), "rev-parse",
+                     f"refs/heads/{request['target_branch']}"),
+            other_head,
+        )
 
     def test_artifact_fan_in_preserves_identical_filenames(self):
         source_dir = self.runner_temp / "rpm-sources"
@@ -393,11 +418,12 @@ class MirrorWorkflows(unittest.TestCase):
             self.assertIn("[0]." + matrix_input, manual["build-rpms"]["with"][matrix_input])
 
     def test_workflow_boundaries_and_failure_gates(self):
-        for name in ("prepare-rpm-sources.yml", "sync-rpm-mirror.yml", "rpm-build.yml", "build-okd-stream-coreos.yml"):
+        for name in ("prepare-rpm-sources.yml", "sync-repo-mirror.yml", "rpm-build.yml", "build-okd-stream-coreos.yml"):
             self.assertEqual(set(workflow(name)["on"]), {"workflow_call"})
-        sync = workflow("sync-rpm-mirror.yml")
+        sync = workflow("sync-repo-mirror.yml")
         self.assertEqual(len(sync["jobs"]), 1)
         self.assertIn("target_branch", sync["concurrency"]["group"])
+        self.assertEqual(sync["name"], "Sync source mirror")
         save = workflow("prepare-rpm-sources.yml")["jobs"]["save-source"]
         self.assertIn("needs.sync.result == 'success'", save["if"])
         builder = workflow("build-okd-stream-coreos.yml")["jobs"]["build-rpms"]

@@ -7,10 +7,11 @@ on:
       - .github/workflows/rpm-build.yml
       - .github/workflows/scan-okd-releases.yml
       - .github/workflows/prepare-rpm-sources.yml
-      - .github/workflows/sync-rpm-mirror.yml
+      - .github/workflows/sync-repo-mirror.yml
       - .github/actions/collect-rpm-sources/action.yml
       - .github/actions/prepare-rpm-build-matrices/action.yml
       - .github/prompts/rpm-mirror-maintenance.md
+      - .github/prompts/os-source-mirror-maintenance.md
       - docs/module-patch.md
       - rpms/mirror-plan.json
       - Dockerfile
@@ -165,7 +166,8 @@ jobs:
         include: ${{ fromJSON(needs.compose-build-configs.outputs.matrix) }}
     permissions:
       actions: read
-      contents: read
+      contents: write
+      copilot-requests: write
       packages: write
     uses: ./.github/workflows/build-okd-stream-coreos.yml
     with:
