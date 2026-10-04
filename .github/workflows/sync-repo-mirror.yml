@@ -44,6 +44,7 @@ jobs:
             const mirror = JSON.parse(process.env.MIRROR);
             const defaultIdentityFile = ".mirror-patch.json";
             const defaultPromptFile = ".github/prompts/source-mirror-maintenance.md";
+            const stackBranch = "mirror-patch";
             function repositoryPath(value, name, optional = false) {
               if ((value === undefined || value === null || value === "") && optional) {
                 return "";
@@ -159,6 +160,7 @@ jobs:
               target_ref: oldHead ? targetRef : null,
               reference_ref: referenceRef,
               worktree,
+              stack_branch: stackBranch,
               patch_id: patchId,
             };
             fs.writeFileSync(
@@ -191,7 +193,7 @@ jobs:
           REPOSITORY_INSTRUCTIONS: ${{ inputs.repository_instructions }}
         with:
           script: |
-            const { spawn } = require("node:child_process");
+            const { execFileSync, spawn } = require("node:child_process");
             const fs = require("node:fs");
             const path = require("node:path");
             const workspace = fs.realpathSync(process.env.GITHUB_WORKSPACE);
@@ -228,14 +230,37 @@ jobs:
               child.on("error", reject);
               child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`Copilot exited ${code}`)));
             });
-            const report = output.match(/^COMMIT_OIDS:[ \t]*(.+?)[ \t]*\r?$/m);
-            // Accept literal brackets copied from the former optional-ID example.
-            const ids = report?.[1].replace(/\[([0-9a-f]{40}(?:[ \t]+[0-9a-f]{40})*)\]/g, "$1");
-            if (!ids || !/^(NONE|[0-9a-f]{40}(?:[ \t]+[0-9a-f]{40})*)$/.test(ids)) {
-              throw new Error("Copilot must report COMMIT_OIDS: <ordered IDs> or COMMIT_OIDS: NONE");
+            // Read the prepared stack from the branch the prompt requires, so
+            // the result never depends on parsing model-authored text.
+            const git = (args) => execFileSync("git", args, {
+              cwd: process.env.WORKTREE, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+            }).trim();
+            const stackRange = `${runContext.source_ref}..${runContext.stack_branch}`;
+            let commits = [];
+            try {
+              commits = git(["rev-list", "--reverse", stackRange]).split("\n").filter(Boolean);
+            } catch (error) {
+              commits = [];
             }
-            if (ids === "NONE") throw new Error("This mirror needs an update; report the identity commit even if no compatibility changes are needed");
-            const commits = ids.split(/\s+/);
+            if (commits.length) {
+              if (git(["rev-list", "--merges", stackRange])) {
+                throw new Error(`The ${runContext.stack_branch} stack must not contain merge commits`);
+              }
+              const subject = git(["log", "-1", "--format=%s", commits[0]]);
+              if (subject !== `PATCH/${runContext.source_branch}`) {
+                throw new Error(
+                  `The first commit of ${runContext.stack_branch} must be PATCH/${runContext.source_branch}`);
+              }
+            } else {
+              // Fallback for a transcript report; the branch above is the contract.
+              const report = output.match(/^COMMIT_OIDS:[ \t]*(.+?)[ \t]*\r?$/m);
+              const ids = report?.[1].replace(/\[([0-9a-f]{40}(?:[ \t]+[0-9a-f]{40})*)\]/g, "$1");
+              if (!ids || !/^[0-9a-f]{40}(?:[ \t]+[0-9a-f]{40})*$/.test(ids)) {
+                throw new Error(
+                  `Copilot must leave the prepared stack on the ${runContext.stack_branch} branch`);
+              }
+              commits = ids.split(/\s+/);
+            }
             core.setOutput("commits", commits.join(" "));
 
       - name: Seed temporary publishing branch

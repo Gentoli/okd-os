@@ -38,8 +38,9 @@ a binary RPM hosting service.
 - Let the agent maintain the mirror. Workflow preparation sets up remotes and
   supplies context. Do not add post-agent spec, RPM-version, path-allowlist, or
   compatibility validation.
-- The agent reports its created commit IDs; workflow steps publish signed
-  commits using `pgaskin/push-signed-commits`.
+- The agent commits its stack to the local `mirror-patch` branch; workflow
+  steps record the stack size, then publish signed commits using
+  `pgaskin/push-signed-commits`.
 - Keep source planning outside both RPM and image build workflows.
 
 ## Workflow graph and contracts
@@ -63,7 +64,7 @@ release matrix. Both use only `workflow_call`.
 | --- | --- | --- |
 | Release selection → preparation | Selected OKD/EL/package tuple and branch rules | Exact/native shared source branch or compatibility mirror request, identified by branches |
 | Preparation → sync | One package, upstream URL/base branch, target branch, target environment, patch identity | Mirror exists and incorporates the fetched upstream head |
-| Agent → publication | Ordered created commit IDs including the identity commit | Signed patch stack published on the target upstream history |
+| Agent → publication | Stack committed on the local `mirror-patch` branch | Signed patch stack published on the target upstream history |
 | Preparation → collection | Unique per-tuple source artifact, emitted only after successful preparation | `{ "<okd>/el<major>": { "<project>": { "url": "...", "branch": "..." } } }` |
 | Collection → builds | Complete source map for the selected target | Build clones the supplied sources directly |
 
@@ -140,17 +141,18 @@ Within that job:
    locate the marker, replay the patch stack onto the current base, resolve
    conflicts, and recreate adaptations that upstream changes require. Preserve
    the identity marker. Create no merge commits and do not push from the agent.
-5. Parse the reported ordered commit IDs, including the recreated marker.
-   The freshness step handles no-ops before invocation; an invoked update must
-   report the identity commit. Pass the stack to publication without inspecting
-   or validating the agent's changes.
+5. Read the ordered commit IDs from the run context's `stack_branch`. The
+   freshness step handles no-ops before invocation; an invoked update must
+   produce the identity commit. Pass the stack to publication without
+   inspecting the agent's content changes.
 6. Publish the signed history as described below, then clean up the temporary
    publishing branch. No inter-job bundles or artifact transfer are needed.
 
 Rewrite `.github/prompts/source-mirror-maintenance.md` as a full creation/update
 walkthrough referring to `docs/module-patch.md` and repository instructions that
 callers inject at runtime. It must be package agnostic, permit
-rebase/cherry-pick, and explain the marker and commit-ID output contract.
+rebase/cherry-pick, and explain the marker and the branch the workflow reads the
+stack from.
 
 ### 4. Publish signed commits while preserving upstream history
 

@@ -44,25 +44,13 @@ requirements.
 5. Preserve upstream provenance and source archives with their upstream
    identity. Do not invent compatibility patches for unaffected files. Keep the
    full current source history underneath the patch stack.
-6. Create ordinary local commits, including the new or recreated marker. Do
-   not create merge commits, push, invoke GitHub write APIs, sign commits, or
-   modify the workflow repository. The workflow publishes your commits through
-   the signing action. There is no separate post-agent validation step.
-7. Report the full IDs of every commit in the newly prepared patch stack,
-   beginning with the marker and ending with the final patch, in chronological
-   order. Include rewritten/cherry-picked commits with their new local IDs.
-   Finish with exactly one machine-readable line:
+6. Create ordinary local commits, including the new or recreated marker, and
+   keep the history linear. Do not create merge commits, push, invoke GitHub
+   write APIs, sign commits, or modify the workflow repository. The workflow
+   publishes your commits through the signing action and does not validate
+   compatibility content.
+7. Commit the prepared stack to the local `mirror-patch` branch, beginning with
+   the marker and ending with the final compatibility change. Do not push.
 
-   Start with `COMMIT_OIDS:` and append the actual full hexadecimal commit IDs,
-   separated by spaces. Do not include brackets, backticks, angle brackets, or
-   explanatory text on that line. For example, a two-commit report is:
-
-   ```text
-   COMMIT_OIDS: c3917c558a79c47db21bda758d655d7c04e6e792 3e5efb7689ed7f758b0f96f545046b20dbbc6655
-   ```
-
-   These example IDs illustrate the format; report your own created IDs.
-
-An invoked update must produce the identity commit, even if no compatibility
-changes are needed. `COMMIT_OIDS: NONE` is reserved for a no-op; do not use it
-for an absent mirror or an update that has not incorporated upstream.
+An invoked update must produce the identity commit even if no compatibility
+changes are needed.

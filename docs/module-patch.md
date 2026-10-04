@@ -53,8 +53,10 @@ fresh mirrors skip the agent and publication steps.
    files and lookaside manifests. Do not merge upstream history or copy its
    files into commits on the old mirror base.
 5. Commit adaptations after the marker. An unaffected package still has an
-   identity commit. Report all resulting patch-stack commit IDs, including the
-   recreated marker. The agent must not push; workflow steps sign and publish.
+   identity commit. Commit the prepared stack to the local `mirror-patch`
+   branch, with linear history; the engine reads the ordered commits from that
+   branch. The agent must not push; workflow steps add the stack trailer, sign,
+   and publish.
 
 `.github/workflows/sync-repo-mirror.yml` is the shared branch-mirror engine.
 Each call selects an optional recipe, bootstrap/reference refs, and the

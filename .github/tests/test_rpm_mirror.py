@@ -294,7 +294,45 @@ class MirrorWorkflows(unittest.TestCase):
             with self.subTest(report=report):
                 result = self.agent_report(report + "\n")
                 self.assertIn("error", result)
-                self.assertEqual(result["outputs"], {})
+        self.assertEqual(result["outputs"], {})
+
+    def test_agent_reads_the_stack_from_the_required_branch(self):
+        self.env.update({"GITHUB_WORKSPACE": str(ROOT), "WORKTREE": str(self.work)})
+        self.git("config", "user.name", "Test", cwd=self.work)
+        self.git("config", "user.email", "test@example.com", cwd=self.work)
+        base = self.git("rev-parse", "HEAD", cwd=self.work)
+        (self.work / "marker").write_text("identity\n")
+        self.commit(self.work, "PATCH/c10s-sig-cloud-okd-4.22")
+        marker = self.git("rev-parse", "HEAD", cwd=self.work)
+        (self.work / "adaptation").write_text("target adaptation\n")
+        self.commit(self.work, "Adapt the target")
+        head = self.git("rev-parse", "HEAD", cwd=self.work)
+        self.git("branch", "--force", "mirror-patch", "HEAD", cwd=self.work)
+        (self.runner_temp / "source-mirror-context.json").write_text(json.dumps({
+            "prompt_file": ".github/prompts/source-mirror-maintenance.md",
+            "recipe_file": "",
+            "source_ref": base,
+            "stack_branch": "mirror-patch",
+            "source_branch": "c10s-sig-cloud-okd-4.22",
+        }))
+        # The transcript is irrelevant; Git supplies the ordered stack.
+        result = self.run_script(script("sync-repo-mirror.yml", "sync", "agent"),
+                                 agent_output=["Finished without reporting commit IDs.\n"])
+        self.assertNotIn("error", result)
+        self.assertEqual(result["outputs"]["commits"], f"{marker} {head}")
+
+    def test_agent_requires_the_stack_branch(self):
+        self.env.update({"GITHUB_WORKSPACE": str(ROOT), "WORKTREE": str(self.work)})
+        (self.runner_temp / "source-mirror-context.json").write_text(json.dumps({
+            "prompt_file": ".github/prompts/source-mirror-maintenance.md",
+            "recipe_file": "",
+            "source_ref": self.base,
+            "stack_branch": "mirror-patch",
+            "source_branch": "c10s-sig-cloud-okd-4.22",
+        }))
+        result = self.run_script(script("sync-repo-mirror.yml", "sync", "agent"),
+                                 agent_output=["Finished without reporting commit IDs.\n"])
+        self.assertIn("mirror-patch branch", result["error"])
 
     def test_advanced_upstream_replays_stack_and_lease_rejects_other_writer(self):
         request = self.request()
