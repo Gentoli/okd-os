@@ -299,7 +299,7 @@ jobs:
               "acr-credential-provider*",
               "gcr-credential-provider*",
           ]
-          if okd_version == "4.22":
+          if okd_version in ("4.21", "4.22"):
               provider_packages.append("crio-credential-provider*")
           runtime_packages = [
               "cri-o*",
@@ -346,7 +346,7 @@ jobs:
               exit 1
             fi
           done
-          if [[ "$OKD_VERSION" == "4.22" ]] &&
+          if [[ "$OKD_VERSION" == "4.21" || "$OKD_VERSION" == "4.22" ]] &&
             ! find "$rpm_dir" -type f \
               -name 'crio-credential-provider-*.rpm' -print -quit \
               | grep -q .; then

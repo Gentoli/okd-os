@@ -40,7 +40,7 @@ runs:
               { component: "acr-credential-provider", repository: "openshift/cloud-provider-azure", spec: "acr-credential-provider.spec" },
               { component: "gcr-credential-provider", repository: "openshift/cloud-provider-gcp", spec: "gcr-credential-provider.spec" },
             ];
-            if (version === "4.22") {
+            if (version === "4.21" || version === "4.22") {
               upstream.push({ component: "crio-credential-provider", repository: "openshift/crio-credential-provider", spec: "crio-credential-provider.spec" });
             }
             const artifact = (group, project) => `${group}-${project}-rpms-okd${version}-el${el}`;

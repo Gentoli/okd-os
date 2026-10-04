@@ -3,7 +3,7 @@
 ## Release matrix
 
 The push/scheduled/manual `scan-okd-releases.yml` workflow currently scans the
-4.22-c9s, 4.22-c10s, and 4.20-c9s targets from `rpms/mirror-plan.json`. It selects
+4.22-c9s, 4.22-c10s, 4.21-c9s, and 4.20-c9s targets from `rpms/mirror-plan.json`. It selects
 releases first, prepares each selected package/OKD/EL source in its caller
 matrix, then collects source maps and calls the reusable
 `build-okd-stream-coreos.yml` workflow for each target. See
@@ -19,7 +19,7 @@ workflow runs. Reusable RPM and image workflows do not plan source mirrors.
 Within each RPM invocation, upstream components and SIG packages build in
 parallel matrix jobs. Each package uploads a separate artifact; the combined
 install test waits for every build to succeed. There are nine package jobs for
-4.22 and eight for 4.20, subject to the available Actions runners.
+4.22 and 4.21, and eight for 4.20, subject to the available Actions runners.
 Scan and reproduction prepare these package matrices with the shared
 `prepare-rpm-build-matrices` action after collecting source maps. The image
 workflow passes them through to the RPM workflow, which expands the supplied
@@ -242,7 +242,7 @@ The push/scheduled/manual
 [`scan-okd-releases.yml`](.github/workflows/scan-okd-releases.yml) workflow
 scans stable releases at
 [okd-project/okd/releases](https://github.com/okd-project/okd/releases), ignoring
-pre-releases, then builds the 4.22-c9s, 4.22-c10s, and 4.20-c9s targets. If a
+pre-releases, then builds the 4.22-c9s, 4.22-c10s, 4.21-c9s, and 4.20-c9s targets. If a
 matching `stream-coreos` image is present in a release payload, the reusable
 [`build-okd-stream-coreos.yml`](.github/workflows/build-okd-stream-coreos.yml)
 workflow uses it as the input and only applies the kernel/GCC overlay. It
@@ -295,7 +295,9 @@ each target to the reusable RPM workflow; standalone dispatch runs one target.
 
 The provider RPMs are correctly named `ecr-credential-provider`,
 `acr-credential-provider`, and `gcr-credential-provider`; their RPM metadata
-provides the three `ose-*` capabilities requested by the 4.20 manifest. The
+provides the three `ose-*` capabilities requested by the 4.20 manifest, and the
+fourth `ose-crio-credential-provider` capability requested by the 4.21 and
+4.22 manifests. The
 pinned upstream compose script's repository allowlist excludes these actual
 package names, so the workflow extends that allowlist in its temporary
 `openshift/os` checkout before composing; it leaves the RPM names and manifest

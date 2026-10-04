@@ -2,6 +2,7 @@
   "build_targets": [
     { "okd_version": "4.22", "os_version": "9", "base": "c9s", "repo_version": "9.8", "run_test": true },
     { "okd_version": "4.22", "os_version": "10", "base": "c10s", "repo_version": "10.0", "run_test": true },
+    { "okd_version": "4.21", "os_version": "9", "base": "c9s", "repo_version": "9.6", "run_test": true },
     { "okd_version": "4.20", "os_version": "9", "base": "c9s", "repo_version": "9.6", "run_test": true }
   ],
   "sources": {

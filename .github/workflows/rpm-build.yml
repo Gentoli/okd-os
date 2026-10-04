@@ -237,7 +237,7 @@ jobs:
             ose-azure-acr-image-credential-provider \
             ose-gcp-gcr-image-credential-provider
           )
-          if [[ "$OKD_VERSION" == "4.22" ]]; then
+          if [[ "$OKD_VERSION" == "4.21" || "$OKD_VERSION" == "4.22" ]]; then
             capabilities+=(ose-crio-credential-provider)
           fi
           for capability in "${capabilities[@]}"; do

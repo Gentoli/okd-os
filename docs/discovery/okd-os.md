@@ -6,6 +6,14 @@ The run used workflow commit `e4405efa4f3990e929f93be3273d668013929200`
 on `rpm-mirror-run`. Its `openshift/os` checkout was
 `cf63d7a58a420b35b7f5e42ea0e7deffec56cf91` from `release-4.22`.
 
+See also the [4.21 compose failure](#okd-421-el9-compose-failure) below: that
+leg failed the same way because the workflow supplied the 4.21 stanza as
+`rhel-9.8-server-ose-4.21` while upstream `release-4.21` extracts
+`rhel-9.6-server-ose-4.21`. The fix was the same class — align the workflow's
+`repo_version` with the upstream script — plus generalizing the 4.22-only
+provider gates to 4.21. The recipe for adding a release is
+[add-okd-release.md](../../.github/prompts/add-okd-release.md).
+
 ## Observed failure
 
 The EL9 fallback uses `scos-base:c9s` and invokes:
@@ -115,3 +123,31 @@ repositories are selected, the built runtime and provider RPMs resolve, and
 image composition and postprocessing complete. The CoreOS `coreos/c9s` branch
 is also created by CI; keep its tracked fwupd patch available as the initial
 bootstrap input until that branch and its first base build succeed.
+
+## OKD 4.21 EL9 compose failure
+
+Investigated on 2026-10-04 from the 4.21 `compose-base-image` job
+111421524665 in [run
+37196423890](https://github.com/Gentoli/okd-os/actions/runs/37196423890).
+That run's `rpms/mirror-plan.json` declared `repo_version: 9.8` for the 4.21
+EL9 target, so the workflow wrote the local repository stanza as
+`[rhel-9.8-server-ose-4.21]`. Upstream `release-4.21`
+(`b3f3bce740fa6b32bf2c06dd8a6f31bdb831915e`) instead extracts
+`[rhel-9.6-server-ose-4.21]` and renames it to
+`rhel-9.6-server-ose-4.21-okd`, which its `centos-9` conditional requests.
+The `awk` therefore produced an empty `okd.repo`, DNF reported
+`Warning: failed loading '/etc/yum.repos.d/okd.repo', skipping`, and the
+compose failed with `Error: Unknown repo: 'rhel-9.6-server-ose-4.21-okd'`.
+
+Unlike the 4.22 case above, upstream `release-4.21` still defines the
+`centos-9` conditional and `c9s.repo`, and the `okd/os-4.21` mirror already
+restores EL9 support (its only compatibility change drops the stale
+`c9s-sig-cloud-okd` runtime repository). No mirror-instruction change was
+needed.
+
+The 4.21 manifest requests all four `ose-*` capabilities, including
+`ose-crio-credential-provider`. The RPM matrix, local allowlist patch, and
+install-test capability check previously gated the fourth provider on
+`4.22` only, so those gates were generalized to `4.21` alongside the
+`repo_version: 9.8` → `9.6` correction. The 4.20 manifest still requests only
+three providers and keeps the three-provider behavior.

@@ -449,7 +449,7 @@ class MirrorWorkflows(unittest.TestCase):
             "conmon-rs": {"url": "https://upstream.example/conmon-rs.git", "branch": "c9s-sig-cloud"},
         }
         targets = [{"version": version, "os_major": el, "run_test": False, "release_image": "selected-image"}
-                   for version, el in (("4.22", "9"), ("4.22", "10"), ("4.20", "9"))]
+                   for version, el in (("4.22", "9"), ("4.22", "10"), ("4.21", "9"), ("4.20", "9"))]
         self.env["TARGETS"] = json.dumps(targets)
         self.env["SOURCES"] = json.dumps({f"{target['version']}/el{target['os_major']}": supplied
                                         for target in targets})
@@ -465,8 +465,8 @@ class MirrorWorkflows(unittest.TestCase):
                 upstream = json.loads(config["upstream_matrix"])
                 sig = json.loads(config["sig_matrix"])
                 components = {row["component"] for row in upstream}
-                self.assertEqual(len(upstream), 6 if version == "4.22" else 5)
-                self.assertEqual("crio-credential-provider" in components, version == "4.22")
+                self.assertEqual(len(upstream), 6 if version in ("4.21", "4.22") else 5)
+                self.assertEqual("crio-credential-provider" in components, version in ("4.21", "4.22"))
                 self.assertTrue({"kubernetes", "oc", "ecr-credential-provider",
                                  "acr-credential-provider", "gcr-credential-provider"} <= components)
                 self.assertEqual({row["project"]: {"url": row["source_url"], "branch": row["source_branch"]}

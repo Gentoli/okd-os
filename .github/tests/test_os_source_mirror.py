@@ -462,26 +462,32 @@ class OsSourceMirror(unittest.TestCase):
         )
         match = re.search(r"<<'PY'\n(.*?)\nPY", step["run"], re.DOTALL)
         self.assertIsNotNone(match)
-        with tempfile.TemporaryDirectory(prefix="okd-includepkgs-test-") as temp:
-            script_path = Path(temp) / "build-node-image.sh"
-            script_path.write_text("includepkgs=ose-aws-ecr-*,ose-gcp-gcr-*\n")
-            subprocess.run(
-                [sys.executable, "-c", match.group(1), str(script_path), "4.22"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            allowlist = script_path.read_text()
-        for package_pattern in (
-            "ecr-credential-provider*",
-            "acr-credential-provider*",
-            "gcr-credential-provider*",
-            "crio-credential-provider*",
-            "cri-o*",
-            "cri-tools*",
-            "conmon-rs*",
-        ):
-            self.assertIn(package_pattern, allowlist)
+        four_provider_versions = ("4.21", "4.22")
+        for okd_version in (*four_provider_versions, "4.20"):
+            with self.subTest(okd_version=okd_version):
+                with tempfile.TemporaryDirectory(prefix="okd-includepkgs-test-") as temp:
+                    script_path = Path(temp) / "build-node-image.sh"
+                    script_path.write_text("includepkgs=ose-aws-ecr-*,ose-gcp-gcr-*\n")
+                    subprocess.run(
+                        [sys.executable, "-c", match.group(1), str(script_path), okd_version],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    allowlist = script_path.read_text()
+                for package_pattern in (
+                    "ecr-credential-provider*",
+                    "acr-credential-provider*",
+                    "gcr-credential-provider*",
+                    "cri-o*",
+                    "cri-tools*",
+                    "conmon-rs*",
+                ):
+                    self.assertIn(package_pattern, allowlist)
+                if okd_version in four_provider_versions:
+                    self.assertIn("crio-credential-provider*", allowlist)
+                else:
+                    self.assertNotIn("crio-credential-provider*", allowlist)
 
 
 if __name__ == "__main__":
