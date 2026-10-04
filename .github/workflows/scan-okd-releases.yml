@@ -10,8 +10,7 @@ on:
       - .github/workflows/sync-repo-mirror.yml
       - .github/actions/collect-rpm-sources/action.yml
       - .github/actions/prepare-rpm-build-matrices/action.yml
-      - .github/prompts/rpm-mirror-maintenance.md
-      - .github/prompts/os-source-mirror-maintenance.md
+      - .github/prompts/source-mirror-maintenance.md
       - docs/module-patch.md
       - rpms/mirror-plan.json
       - Dockerfile

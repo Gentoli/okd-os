@@ -7,6 +7,10 @@ on:
         description: One branch-based source mirror request
         required: true
         type: string
+      repository_instructions:
+        description: Repository-specific maintenance instructions appended to the shared prompt
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -38,6 +42,8 @@ jobs:
             const fs = require("node:fs");
             const path = require("node:path");
             const mirror = JSON.parse(process.env.MIRROR);
+            const defaultIdentityFile = ".mirror-patch.json";
+            const defaultPromptFile = ".github/prompts/source-mirror-maintenance.md";
             function repositoryPath(value, name, optional = false) {
               if ((value === undefined || value === null || value === "") && optional) {
                 return "";
@@ -54,8 +60,10 @@ jobs:
                 throw new Error(`Mirror request is missing ${key}.`);
               }
             }
-            mirror.identity_file = repositoryPath(mirror.identity_file, "identity_file");
-            mirror.prompt_file = repositoryPath(mirror.prompt_file, "prompt_file");
+            mirror.identity_file = repositoryPath(
+              mirror.identity_file || defaultIdentityFile, "identity_file");
+            mirror.prompt_file = repositoryPath(
+              mirror.prompt_file || defaultPromptFile, "prompt_file");
             mirror.recipe_file = repositoryPath(mirror.recipe_file, "recipe_file", true);
             mirror.seed_patch = repositoryPath(mirror.seed_patch, "seed_patch", true);
             if (mirror.target_branch.includes("..") ||
@@ -166,6 +174,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           WORKTREE: ${{ steps.prepare.outputs.worktree }}
+          REPOSITORY_INSTRUCTIONS: ${{ inputs.repository_instructions }}
         with:
           script: |
             const { spawn } = require("node:child_process");
@@ -190,7 +199,10 @@ jobs:
             const seedPatch = runContext.seed_patch
               ? `\n\nBootstrap patch:\n${runContext.seed_patch}`
               : "";
-            const prompt = read(runContext.prompt_file) + recipe + seedPatch +
+            const instructions = process.env.REPOSITORY_INSTRUCTIONS
+              ? `\n\nRepository instructions:\n${process.env.REPOSITORY_INSTRUCTIONS}`
+              : "";
+            const prompt = read(runContext.prompt_file) + instructions + recipe + seedPatch +
               "\n\nRun context:\n" + JSON.stringify(runContext, null, 2);
             let output = "";
             await new Promise((resolve, reject) => {

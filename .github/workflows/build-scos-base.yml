@@ -7,7 +7,7 @@ on:
     paths:
       - .github/workflows/build-scos-base.yml
       - .github/workflows/sync-repo-mirror.yml
-      - .github/prompts/os-source-mirror-maintenance.md
+      - .github/prompts/source-mirror-maintenance.md
       - os/base/**
   workflow_dispatch:
 
@@ -33,10 +33,14 @@ jobs:
           "source_branch": "HEAD",
           "target_branch": "coreos/c9s",
           "target_version": null,
-          "identity_file": ".okd-source-patch.json",
-          "prompt_file": ".github/prompts/os-source-mirror-maintenance.md",
           "seed_patch": "os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch"
         }
+      repository_instructions: |
+        - This mirror carries the CoreOS build configuration. Apply the tracked
+          `seed_patch` from `GITHUB_WORKSPACE` to the worktree for the initial
+          mirror only, and commit it directly after the marker. Do not apply it
+          again on updates; replay that compatibility commit from `target_ref`
+          instead.
 
   build-and-push:
     name: Build ${{ matrix.stream }} base

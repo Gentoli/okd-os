@@ -80,8 +80,6 @@ jobs:
                 target_el: el,
                 target_okd_version: version,
                 patch_id: `${project}__${base}__${target}`,
-                identity_file: ".rpm-patch.json",
-                prompt_file: ".github/prompts/rpm-mirror-maintenance.md",
                 recipe_file: "docs/module-patch.md",
               };
               source = { url: `https://github.com/${process.env.GITHUB_REPOSITORY}.git`, branch };
@@ -98,6 +96,14 @@ jobs:
     uses: ./.github/workflows/sync-repo-mirror.yml
     with:
       mirror: ${{ needs.select.outputs.mirror }}
+      repository_instructions: |
+        - This mirror is a package source checkout, despite the hosting
+          repository's name. Inspect the packaging history, `SPECS`, `SOURCES`,
+          and the lookaside `sources` manifest; do not assume the spec is the
+          only file involved in compatibility.
+        - Preserve source archives and their CentOS lookaside identity. Use
+          packaging evidence from comparable target and source branches, and do
+          not invent compatibility patches for unaffected packages.
 
   save-source:
     needs: [select, sync]

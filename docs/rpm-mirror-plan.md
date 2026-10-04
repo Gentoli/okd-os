@@ -1,6 +1,6 @@
 # RPM source mirror reimplementation plan
 
-Status: implemented in the working copy. The marker commits `.rpm-patch.json`
+Status: implemented in the working copy. The marker commits `.mirror-patch.json`
 with patch identity information. Compatibility changes are commits on the
 mirror branch; no standalone local patch files are maintained.
 
@@ -29,7 +29,7 @@ a binary RPM hosting service.
 - Retain upstream Git history, independent of `main`. Replay compatibility
   commits by rebase/cherry-pick. The first commit after the upstream base must be
   identified by the subject `PATCH/<upstream-base-branch>` and contain the
-  patch identity file `.rpm-patch.json`.
+  patch identity file `.mirror-patch.json`.
 - Define a stable patch identity from the package, source branch (including its
   source EL/OKD version), and target EL/OKD version. Do not include a SHA or RPM
   `Release:` in that identity.
@@ -147,9 +147,10 @@ Within that job:
 6. Publish the signed history as described below, then clean up the temporary
    publishing branch. No inter-job bundles or artifact transfer are needed.
 
-Rewrite `.github/prompts/rpm-mirror-maintenance.md` as a full creation/update
-walkthrough referring to `docs/module-patch.md`. It must be package agnostic,
-permit rebase/cherry-pick, and explain the marker and commit-ID output contract.
+Rewrite `.github/prompts/source-mirror-maintenance.md` as a full creation/update
+walkthrough referring to `docs/module-patch.md` and repository instructions that
+callers inject at runtime. It must be package agnostic, permit
+rebase/cherry-pick, and explain the marker and commit-ID output contract.
 
 ### 4. Publish signed commits while preserving upstream history
 

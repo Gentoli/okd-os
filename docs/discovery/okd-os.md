@@ -90,8 +90,9 @@ checks it out. Builds that use a matching release `stream-coreos` image skip
 both mirror sync and fallback composition. These checks run through existing
 release-scan and builder triggers; there is no independent mirror schedule.
 
-The OS mirror request selects an OS-specific maintenance prompt and
-`.okd-source-patch.json` identity marker. For 4.22 it also fetches
+The OS mirror request injects OS-specific maintenance instructions into the
+shared `.github/prompts/source-mirror-maintenance.md` prompt and uses the
+general `.mirror-patch.json` identity marker. For 4.22 it also fetches
 `release-4.20` as the reference for the CentOS 9 conditional and repository
 IDs. The prompt maintains the 4.22 manifest and EL9 repository changes as
 compatibility commits on `okd/os-4.22`; it selects `c9s.repo` for

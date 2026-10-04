@@ -44,11 +44,8 @@ class OsSourceMirror(unittest.TestCase):
         self.git("config", "user.email", "test@example.com", cwd=self.work)
         self.git("config", "commit.gpgsign", "false", cwd=self.work)
         (self.work / ".github/prompts").mkdir(parents=True)
-        (self.work / ".github/prompts/os-source-mirror-maintenance.md").write_text(
-            "Maintain the OS source mirror.\n"
-        )
-        (self.work / ".github/prompts/rpm-mirror-maintenance.md").write_text(
-            "Maintain the RPM source mirror.\n"
+        (self.work / ".github/prompts/source-mirror-maintenance.md").write_text(
+            "Maintain the source mirror.\n"
         )
         (self.work / "docs").mkdir()
         (self.work / "docs/module-patch.md").write_text("RPM source recipe.\n")
@@ -113,8 +110,6 @@ class OsSourceMirror(unittest.TestCase):
                 "source_branch": "HEAD",
                 "target_branch": "coreos/c9s",
                 "target_version": None,
-                "identity_file": ".okd-source-patch.json",
-                "prompt_file": ".github/prompts/os-source-mirror-maintenance.md",
                 "seed_patch": "os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch",
             }
         return {
@@ -124,8 +119,6 @@ class OsSourceMirror(unittest.TestCase):
             "target_branch": "okd/os-4.22",
             "target_version": "4.22",
             "reference_branch": "release-4.20",
-            "identity_file": ".okd-source-patch.json",
-            "prompt_file": ".github/prompts/os-source-mirror-maintenance.md",
         }
 
     def prepare(self, request):
@@ -153,7 +146,7 @@ class OsSourceMirror(unittest.TestCase):
             "target_branch": request["target_branch"],
             "target_version": request["target_version"],
         }
-        (checkout / request["identity_file"]).write_text(json.dumps(marker) + "\n")
+        (checkout / ".mirror-patch.json").write_text(json.dumps(marker) + "\n")
         self.commit(checkout, f"PATCH/{source_branch}")
         (checkout / "compatibility").write_text("target adaptation\n")
         self.commit(checkout, "Adapt target")
@@ -177,7 +170,9 @@ class OsSourceMirror(unittest.TestCase):
         )
         self.assertEqual(context["source_branch"], "main")
         self.assertEqual(context["target_branch"], "coreos/c9s")
-        self.assertEqual(context["identity_file"], ".okd-source-patch.json")
+        self.assertEqual(context["identity_file"], ".mirror-patch.json")
+        self.assertEqual(
+            context["prompt_file"], ".github/prompts/source-mirror-maintenance.md")
         self.assertEqual(
             context["seed_patch"],
             "os/base/c9s/patches/0001-drop-unresolvable-fwupd-plugin.patch",
@@ -216,7 +211,7 @@ class OsSourceMirror(unittest.TestCase):
         self.env["RUNNER_TEMP"] = str(self.runner_temp)
         self.env["GITHUB_WORKSPACE"] = str(self.work)
         (self.runner_temp / "source-mirror-context.json").write_text(json.dumps({
-            "prompt_file": ".github/prompts/os-source-mirror-maintenance.md",
+            "prompt_file": ".github/prompts/source-mirror-maintenance.md",
             "recipe_file": "",
             "seed_patch": "",
         }))
@@ -242,7 +237,7 @@ class OsSourceMirror(unittest.TestCase):
             "target_branch": request["target_branch"],
             "target_version": None,
         }
-        (worktree / request["identity_file"]).write_text(json.dumps(marker) + "\n")
+        (worktree / ".mirror-patch.json").write_text(json.dumps(marker) + "\n")
         self.commit(worktree, "PATCH/main")
         marker_oid = self.git("rev-parse", "HEAD", cwd=worktree)
         (worktree / "compatibility").write_text("fwupd compatibility\n")
@@ -316,6 +311,10 @@ class OsSourceMirror(unittest.TestCase):
         )
         self.assertEqual(base_jobs["build-and-push"]["needs"], "sync-coreos-source")
         self.assertNotIn("inputs", base["on"]["workflow_dispatch"] or {})
+        self.assertIn(
+            "seed_patch",
+            base_jobs["sync-coreos-source"]["with"]["repository_instructions"],
+        )
         coreos_checkout = next(
             step for step in base_jobs["build-and-push"]["steps"]
             if step.get("name") == "Checkout CoreOS config"
@@ -328,6 +327,10 @@ class OsSourceMirror(unittest.TestCase):
             "needs.resolve-source.outputs.compose == 'true'",
         )
         self.assertIn("sync-openshift-os-source", okd["compose-base-image"]["needs"])
+        self.assertIn(
+            "centos-9",
+            okd["sync-openshift-os-source"]["with"]["repository_instructions"],
+        )
         os_checkout = next(
             step for step in okd["compose-base-image"]["steps"]
             if step.get("name") == "Checkout matching openshift/os source"
@@ -339,7 +342,7 @@ class OsSourceMirror(unittest.TestCase):
         self.assertEqual(scan["jobs"]["build"]["permissions"]["contents"], "write")
         self.assertEqual(scan["jobs"]["build"]["permissions"]["copilot-requests"], "write")
         self.assertIn(
-            ".github/prompts/os-source-mirror-maintenance.md",
+            ".github/prompts/source-mirror-maintenance.md",
             scan["on"]["push"]["paths"],
         )
         self.assertFalse((ROOT / ".github/workflows/sync-os-source-mirror.yml").exists())

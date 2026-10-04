@@ -24,6 +24,7 @@ const child = require('node:child_process');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 Object.assign(process.env, input.env);
 const outputs = {};
+const spawns = [];
 const customRequire = (name) => name === 'node:child_process' ? {
   ...child,
   execFileSync: (program, args, options) => {
@@ -32,8 +33,9 @@ const customRequire = (name) => name === 'node:child_process' ? {
     }
     return child.execFileSync(program, args.map(a => input.urls[a] ?? a), options);
   },
-  spawn: () => {
+  spawn: (program, args) => {
     if (input.agent_output === undefined) throw new Error('Copilot requests are disabled in tests');
+    spawns.push([program, ...args]);
     const { EventEmitter } = require('node:events');
     const agent = new EventEmitter();
     agent.stdout = new EventEmitter();
@@ -57,9 +59,9 @@ const workflowProcess = input.agent_output === undefined ? process : {
 (async () => {
   try {
     await new AsyncFunction('require', 'core', 'github', 'context', 'process', input.script)(customRequire, core, github, {}, workflowProcess);
-    process.stdout.write(JSON.stringify({ outputs }));
+    process.stdout.write(JSON.stringify({ outputs, spawns }));
   } catch (error) {
-    process.stdout.write(JSON.stringify({ error: error.message, outputs }));
+    process.stdout.write(JSON.stringify({ error: error.message, outputs, spawns }));
   }
 })();
 """
@@ -151,7 +153,7 @@ class MirrorWorkflows(unittest.TestCase):
         self.git("clone", str(self.upstream), str(checkout))
         self.git("config", "user.name", "Test", cwd=checkout)
         self.git("config", "user.email", "test@example.com", cwd=checkout)
-        (checkout / ".rpm-patch.json").write_text(json.dumps({"id": request["patch_id"]}))
+        (checkout / ".mirror-patch.json").write_text(json.dumps({"id": request["patch_id"]}))
         self.commit(checkout, "PATCH/" + request["source_branch"])
         (checkout / "compatibility").write_text("target adaptation\n")
         self.commit(checkout, "Adapt target")
@@ -169,10 +171,14 @@ class MirrorWorkflows(unittest.TestCase):
         request = self.request()
         self.assertEqual(request["patch_id"], "cri-o__c10s-sig-cloud-okd-4.22__el9-okd4.22")
         self.assertEqual(request["target_branch"], "rpms/cri-o-el9-4.22")
-        self.assertEqual(request["identity_file"], ".rpm-patch.json")
-        self.assertEqual(request["prompt_file"], ".github/prompts/rpm-mirror-maintenance.md")
+        self.assertNotIn("identity_file", request)
+        self.assertNotIn("prompt_file", request)
         self.assertEqual(request["recipe_file"], "docs/module-patch.md")
         self.assertFalse(any("sha" in key for key in request))
+        self.assertIn(
+            "SPECS",
+            workflow("prepare-rpm-sources.yml")["jobs"]["sync"]["with"]["repository_instructions"],
+        )
 
     def test_native_shared_el9_source_is_direct_for_both_releases(self):
         self.env["PROJECT"] = "conmon-rs"
@@ -238,12 +244,25 @@ class MirrorWorkflows(unittest.TestCase):
     def agent_report(self, output):
         self.env.update({"GITHUB_WORKSPACE": str(ROOT), "WORKTREE": str(self.work)})
         (self.runner_temp / "source-mirror-context.json").write_text(json.dumps({
-            "prompt_file": ".github/prompts/rpm-mirror-maintenance.md",
+            "prompt_file": ".github/prompts/source-mirror-maintenance.md",
             "recipe_file": "docs/module-patch.md",
         }))
         # Split the report as streamed CLI output, without making an agent request.
         return self.run_script(script("sync-repo-mirror.yml", "sync", "agent"),
                                agent_output=[output[:20], output[20:]])
+
+    def test_agent_injects_repository_instructions_into_the_prompt(self):
+        self.env["REPOSITORY_INSTRUCTIONS"] = "Inspect the packaging lookaside manifest."
+        result = self.agent_report(
+            "COMMIT_OIDS: c3917c558a79c47db21bda758d655d7c04e6e792")
+        self.assertNotIn("error", result)
+        prompt = result["spawns"][0][2]
+        self.assertIn("# Maintain one source mirror", prompt)
+        injected = prompt.index("\n\nRepository instructions:\n")
+        self.assertLess(
+            injected, prompt.index("Inspect the packaging lookaside manifest."))
+        self.assertLess(prompt.index("Inspect the packaging lookaside manifest."), prompt.index("Recipe:"))
+        self.assertLess(prompt.index("Recipe:"), prompt.index("Run context:"))
 
     def test_agent_reports_preserve_order_with_literal_optional_brackets(self):
         marker = "c3917c558a79c47db21bda758d655d7c04e6e792"

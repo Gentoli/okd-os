@@ -17,9 +17,8 @@ use mirrors named `rpms/<project>-el<major>-<okd-version>`.
 
 The mirror retains the selected upstream branch's complete history, separate
 from `main`. The first commit after upstream has the subject
-`PATCH/<upstream-base-branch>` and commits `.rpm-patch.json`. Its fields are
-`id`, `project`, `source_url`, `source_branch`, `target_el`, and
-`target_okd_version` (null for shared packages). The ID format is
+`PATCH/<upstream-base-branch>` and commits `.mirror-patch.json`. Its fields are
+`id`, `project`, `source_url`, and `source_branch`. The ID format is
 `<project>__<source-branch>__el<target-major>-okd<target-version>`, or
 `<project>__<source-branch>__el<target-major>` for a shared target. Source branch
 names carry the source EL/OKD version. Neither SHAs nor RPM `Release:` values
@@ -39,7 +38,7 @@ freshness. Current mirrors skip the agent and publication steps.
    version available in both to understand packaging differences. Separate
    environment adaptations from changes to package versions, source archives,
    and unrelated upstream improvements.
-3. Start a local branch at the current source base. Write `.rpm-patch.json`
+3. Start a local branch at the current source base. Write `.mirror-patch.json`
    from the supplied context, and commit it with the required `PATCH/` subject.
    This commit records identity; compatibility changes follow it.
 4. For creation, recreate only target differences justified by the comparison.
@@ -54,13 +53,13 @@ freshness. Current mirrors skip the agent and publication steps.
    recreated marker. The agent must not push; workflow steps sign and publish.
 
 `.github/workflows/sync-repo-mirror.yml` is the shared branch-mirror engine.
-Each mirror request selects its identity file, maintenance prompt, optional
-recipe, and any bootstrap/reference refs; the workflow validates repository-
-relative prompt paths and then uses the same ancestry, signing, and
-lease-publication flow. RPM requests select
-`.github/prompts/rpm-mirror-maintenance.md`, `docs/module-patch.md`, and
-`.rpm-patch.json`; OS source mirrors use their own prompt and marker. The RPM
-instruction remains package agnostic within RPM compatibility work.
+Each call selects an optional recipe, bootstrap/reference refs, and the
+repository instructions that the workflow appends to the shared
+`.github/prompts/source-mirror-maintenance.md` prompt at runtime; it validates
+repository-relative prompt paths and then uses the same ancestry, signing, and
+lease-publication flow. The identity marker defaults to `.mirror-patch.json`.
+RPM requests add `docs/module-patch.md` and packaging instructions; OS source
+requests add their repository instructions.
 
 Sync uses one job with `contents: write`, `copilot-requests: write`, inline
 `github-script` preparation, and Copilot CLI with `--model gpt-6-luna`. There
