@@ -1,0 +1,6 @@
+{
+  "id": "coreos-rhel-coreos-config__main__coreos-c9s",
+  "project": "coreos/rhel-coreos-config",
+  "source_url": "https://github.com/coreos/rhel-coreos-config.git",
+  "source_branch": "main"
+}
