@@ -253,12 +253,38 @@ the matching RPMs in the same workflow run and composes from the latest
 c10s base is built. The other release/base matrix entries remain commented out
 while testing.
 
-For custom-composed images other than 4.22/EL9, the stream overlay preserves
-the kernel already present in the composed image instead of running
-`rpm-ostree override replace` against the same base package versions. The
-driver-toolkit overlay uses that image's installed `kernel-core` version so its
-kernel development packages stay in sync. The 4.22/EL9 overlay behavior is
-unchanged.
+The overlay workflow resolves the machine image's kernel version before it
+builds anything, reading the `io.okd.source.kernel.version` label rather than
+inspecting the image. When the resolved source image already provides the target
+kernel, it skips the stream-coreos build entirely and publishes that image under
+`stream-coreos:<version>-<stream>`. The kernel overlay therefore only runs when
+the versions actually differ, which also keeps `rpm-ostree override replace`
+from rejecting exact base package versions. Custom-composed images other than
+4.22/EL9 keep the kernel already present in the composed image, while the
+4.22/EL9 overlay still targets the latest CentOS Stream build. The
+driver-toolkit overlay uses the resolved kernel version so its kernel
+development packages stay in sync.
+
+An unresolvable version never stops image production. A source image without a
+kernel label still attempts the replacement; when the stream version cannot be
+resolved the source image is published unchanged, and the driver-toolkit overlay
+falls back to the source image's kernel, skipping that overlay only when neither
+version is known.
+
+Every published image records the kernel it provides in the
+`io.okd.source.kernel.version` label: `scos-base:c9s`, the `scos-base:c9s-vm`
+disk, the `stream-coreos:compose-*` machine image, and the `stream-coreos` and
+`driver-toolkit` overlays. The label is omitted when its kernel version cannot
+be resolved, so downstream detection falls back to the kernel packages in the
+image. The SCOS base resolves its kernel from the `rpmostree.rpmdb.pkglist`
+entry in its build `commitmeta.json` and copies the archive to GHCR once; the
+composed machine image reuses the label recorded on that base. Provenance and
+kernel labels reach the registry through
+`crane mutate`, installed with
+[`jaxxstorm/action-install-gh-release`](https://github.com/jaxxstorm/action-install-gh-release)
+at a pinned tag and asset digest, rather than through a rebuild or a commit: it
+rewrites the image config and manifest in place, so layers and history are
+untouched, and no image has to be pulled back to the runner for labeling.
 
 The workflow publishes `stream-coreos:<version>-<stream>` and
 `driver-toolkit:<version>-<stream>`. Each image records its release payload,

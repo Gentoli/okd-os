@@ -85,6 +85,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install crane
+        uses: jaxxstorm/action-install-gh-release@v3.0.0
+        with:
+          repo: google/go-containerregistry
+          tag: v0.22.1
+          # Keep the digest in step with the tag; it is published in the
+          # release's checksums.txt.
+          digest: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+
       - name: Checkout CoreOS config
         uses: actions/checkout@v4
         with:
@@ -163,6 +172,40 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve SCOS kernel version
+        env:
+          STREAM: ${{ matrix.stream }}
+          OCI_IMAGE: ${{ steps.oci-image.outputs.path }}
+        run: |
+          set -euo pipefail
+          # Cosa records the installed packages beside the image, so the kernel
+          # comes from the build metadata instead of an image inspection.
+          commitmeta="$(dirname "$OCI_IMAGE")/commitmeta.json"
+          kernel_version=""
+          if [[ -f "$commitmeta" ]]; then
+            kernel_version=$(python3 - "$commitmeta" <<'PY'
+          import json
+          import sys
+
+          try:
+              with open(sys.argv[1]) as handle:
+                  commitmeta = json.load(handle)
+          except (OSError, ValueError):
+              sys.exit(0)
+          for package in commitmeta.get("rpmostree.rpmdb.pkglist", []):
+              if package and package[0] == "kernel-core":
+                  print(f"{package[2]}-{package[3]}")
+                  break
+          PY
+            ) || true
+          fi
+          if [[ "$kernel_version" =~ ^[0-9][A-Za-z0-9._+-]*-[A-Za-z0-9._+~%]+$ ]]; then
+            echo "KERNEL_VERSION=${kernel_version}" >> "$GITHUB_ENV"
+            echo "The SCOS ${STREAM} images provide kernel ${kernel_version}."
+          else
+            echo "::warning::Could not read the kernel from ${commitmeta}; no label applied." >&2
+          fi
+
       - name: Publish SCOS VM image to GHCR
         env:
           STREAM: ${{ matrix.stream }}
@@ -184,29 +227,30 @@ jobs:
             --tag "${image_ref}:${qemu_tag}" \
             "$qemu_dir"
           podman push "${image_ref}:${qemu_tag}"
+          if [[ -n "${KERNEL_VERSION:-}" ]]; then
+            crane mutate \
+              --label "io.okd.source.kernel.version=${KERNEL_VERSION}" \
+              --tag "${image_ref}:${qemu_tag}" \
+              "${image_ref}:${qemu_tag}"
+          fi
 
       - name: Publish SCOS base image
         env:
           STREAM: ${{ matrix.stream }}
+          OCI_IMAGE: ${{ steps.oci-image.outputs.path }}
         run: |
           set -euo pipefail
           image_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/scos-base"
           revision_label=org.opencontainers.image.revision
-          skopeo copy \
-            "oci-archive:${{ steps.oci-image.outputs.path }}" \
-            "containers-storage:localhost/scos-base-source:${STREAM}"
           config_source=https://github.com/coreos/rhel-coreos-config
-          container_id=$(podman create \
-            "localhost/scos-base-source:${STREAM}")
-          trap 'podman rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
-          podman commit \
-            --change "LABEL org.opencontainers.image.source=${config_source}" \
-            --change "LABEL org.opencontainers.image.version=${STREAM}" \
-            --change "LABEL ${revision_label}=${COREOS_CONFIG_REVISION}" \
-            --change "LABEL io.okd.source.workflow.revision=${GITHUB_SHA}" \
-            "$container_id" "${image_ref}:${STREAM}"
-          podman rm "$container_id"
-          trap - EXIT
-          podman push --format oci \
-            "${image_ref}:${STREAM}" \
-            "docker://${image_ref}:${STREAM}"
+          skopeo copy --format oci "oci-archive:${OCI_IMAGE}" "docker://${image_ref}:${STREAM}"
+          labels=(
+            --label "org.opencontainers.image.source=${config_source}"
+            --label "org.opencontainers.image.version=${STREAM}"
+            --label "${revision_label}=${COREOS_CONFIG_REVISION}"
+            --label "io.okd.source.workflow.revision=${GITHUB_SHA}"
+          )
+          if [[ -n "${KERNEL_VERSION:-}" ]]; then
+            labels+=(--label "io.okd.source.kernel.version=${KERNEL_VERSION}")
+          fi
+          crane mutate "${labels[@]}" --tag "${image_ref}:${STREAM}" "${image_ref}:${STREAM}"

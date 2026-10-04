@@ -265,6 +265,15 @@ jobs:
           sudo apt-get install --no-install-recommends -y \
             createrepo-c podman skopeo
 
+      - name: Install crane
+        uses: jaxxstorm/action-install-gh-release@v3.0.0
+        with:
+          repo: google/go-containerregistry
+          tag: v0.22.1
+          # Keep the digest in step with the tag; it is published in the
+          # release's checksums.txt.
+          digest: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+
       - name: Allow local runtime and provider RPM packages
         working-directory: openshift-os
         env:
@@ -362,6 +371,8 @@ jobs:
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" |
             podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GHCR_TOKEN" |
+            crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Compose and publish machine image
         id: compose
@@ -382,24 +393,38 @@ jobs:
           image_ref="ghcr.io/${IMAGE_OWNER,,}/stream-coreos:compose-${OKD_VERSION}-${BASE_STREAM}-${GITHUB_RUN_ID}"
           podman build \
             --from "$BASE_IMAGE" \
-            --label "org.opencontainers.image.version=${OKD_VERSION}" \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --label "org.opencontainers.image.base.name=${BASE_IMAGE}" \
-            --label "org.opencontainers.image.base.digest=${base_digest}" \
-            --label "io.okd.source.release.tag=${RELEASE_TAG}" \
-            --label "io.okd.source.release.payload=${RELEASE_IMAGE}" \
-            --label "io.okd.source.release.revision=${RELEASE_COMMIT}" \
-            --label "io.okd.source.scos-base.version=${base_version}" \
-            --label "io.okd.source.scos-base.digest=${base_digest}" \
-            --label "io.okd.source.scos-base.revision=${base_revision}" \
-            --label "io.okd.source.openshift-os.revision=${os_revision}" \
-            --label "io.okd.source.rpm-build.run=${GITHUB_RUN_ID}" \
             --secret id=yumrepos,src="$RUNNER_TEMP/yumrepos" \
             --volume "$RUNNER_TEMP/okd-rpms:/var/tmp/okd-rpm-repo:ro" \
             --security-opt label=disable \
             --tag "$image_ref" \
             "$GITHUB_WORKSPACE/openshift-os"
+          # The composed image keeps the kernel of its base, so reuse the label
+          # recorded there instead of inspecting the image.
+          kernel_version=$(jq -r '.Labels["io.okd.source.kernel.version"] // ""' <<< "$base_info")
+          labels=(
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            --label "org.opencontainers.image.version=${OKD_VERSION}"
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}"
+            --label "org.opencontainers.image.base.name=${BASE_IMAGE}"
+            --label "org.opencontainers.image.base.digest=${base_digest}"
+            --label "io.okd.source.release.tag=${RELEASE_TAG}"
+            --label "io.okd.source.release.payload=${RELEASE_IMAGE}"
+            --label "io.okd.source.release.revision=${RELEASE_COMMIT}"
+            --label "io.okd.source.scos-base.version=${base_version}"
+            --label "io.okd.source.scos-base.digest=${base_digest}"
+            --label "io.okd.source.scos-base.revision=${base_revision}"
+            --label "io.okd.source.openshift-os.revision=${os_revision}"
+            --label "io.okd.source.rpm-build.run=${GITHUB_RUN_ID}"
+          )
+          if [[ "$kernel_version" =~ ^[0-9][A-Za-z0-9._+-]*-[A-Za-z0-9._+~%]+$ ]]; then
+            labels+=(--label "io.okd.source.kernel.version=${kernel_version}")
+          else
+            echo "::warning::Could not resolve the composed kernel version." >&2
+          fi
           podman push "$image_ref" "docker://${image_ref}"
+          # Record provenance in the registry, without rebuilding the image or
+          # adding a layer.
+          crane mutate "${labels[@]}" --tag "$image_ref" "$image_ref"
           echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
 
   publish-overlays:
@@ -443,6 +468,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y jq podman skopeo
 
+      - name: Install crane
+        uses: jaxxstorm/action-install-gh-release@v3.0.0
+        with:
+          repo: google/go-containerregistry
+          tag: v0.22.1
+          # Keep the digest in step with the tag; it is published in the
+          # release's checksums.txt.
+          digest: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -450,29 +484,38 @@ jobs:
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" |
             podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GHCR_TOKEN" |
+            crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Select kernel package version
         id: kernel
         run: |
           set -euo pipefail
-          use_composed_kernel=false
-          replace_stream_kernel=true
+          source_image="${STREAM_IMAGE:-$COMPOSED_IMAGE}"
+          if [[ -z "$source_image" ]]; then
+            echo "No source image is available for the kernel overlay." >&2
+            exit 1
+          fi
+          kernel_pattern="^[0-9][A-Za-z0-9._+-]*\\.el${OS_MAJOR}$"
+          # The source kernel comes from the recorded label; the overlay never
+          # inspects the image.
+          source_kernel=$(
+            skopeo inspect --no-tags \
+              --format '{{index .Labels "io.okd.source.kernel.version"}}' \
+              "docker://${source_image}" 2>/dev/null || true
+          )
+
+          keep_composed_kernel=false
           if [[ -n "$COMPOSED_IMAGE" ]]; then
             if [[ "$OKD_VERSION" == "4.22" && "$OS_MAJOR" == "9" ]]; then
               echo "Preserving the existing 4.22/EL9 kernel overlay behavior."
             else
-              use_composed_kernel=true
-              replace_stream_kernel=false
+              keep_composed_kernel=true
             fi
           fi
 
-          if [[ "$use_composed_kernel" == true ]]; then
-            kernel_version=$(
-              podman run --rm \
-                --entrypoint /usr/bin/rpm \
-                "$COMPOSED_IMAGE" \
-                -q --qf '%{VERSION}-%{RELEASE}\n' kernel-core
-            )
+          if [[ "$keep_composed_kernel" == true ]]; then
+            kernel_version="$source_kernel"
           else
             kernel_version=$(
               podman run --rm --pull=always \
@@ -481,15 +524,25 @@ jobs:
                   dnf install -y dnf-plugins-core >/dev/null 2>&1
                   dnf repoquery --latest-limit=1 \
                     --qf "%{VERSION}-%{RELEASE}" kernel-core
-                '
+                ' 2>/dev/null || true
             )
           fi
-          kernel_pattern="^[0-9][A-Za-z0-9._+-]*\\.el${OS_MAJOR}$"
+          # Unknown versions must not stop the pipeline: an unknown source
+          # kernel attempts the replacement, while an unknown stream kernel
+          # leaves the source image as the published overlay.
+          replace_stream_kernel=false
           if [[ ! "$kernel_version" =~ $kernel_pattern ]]; then
-            echo "Could not resolve one valid EL${OS_MAJOR} kernel version." >&2
-            exit 1
+            echo "::warning::No EL${OS_MAJOR} kernel found; publishing the source image." >&2
+          elif [[ ! "$source_kernel" =~ $kernel_pattern ]]; then
+            echo "::warning::No kernel label on ${source_image}; replacing the kernel." >&2
+            replace_stream_kernel=true
+          elif [[ "$kernel_version" != "$source_kernel" ]]; then
+            replace_stream_kernel=true
+          else
+            echo "Source image already provides kernel ${kernel_version}."
           fi
           echo "version=$kernel_version" >> "$GITHUB_OUTPUT"
+          echo "source_version=$source_kernel" >> "$GITHUB_OUTPUT"
           printf 'replace_stream_kernel=%s\n' "$replace_stream_kernel" \
             >> "$GITHUB_OUTPUT"
 
@@ -594,6 +647,7 @@ jobs:
         uses: actions/github-script@v9
         env:
           KERNEL_VERSION: ${{ steps.kernel.outputs.version }}
+          SOURCE_KERNEL_VERSION: ${{ steps.kernel.outputs.source_version }}
           REPLACE_STREAM_KERNEL: >-
             ${{ steps.kernel.outputs.replace_stream_kernel }}
         with:
@@ -612,8 +666,16 @@ jobs:
               "io.okd.source.release.payload": process.env.RELEASE_IMAGE,
               "io.okd.source.release.revision": process.env.RELEASE_COMMIT,
               "io.okd.source.base.stream": process.env.BASE_STREAM,
-              "io.okd.source.kernel.version": process.env.KERNEL_VERSION,
             };
+            const kernelPattern = /^[0-9][A-Za-z0-9._+-]*-[A-Za-z0-9._+~%]+$/;
+            const streamKernel = process.env.KERNEL_VERSION ?? "";
+            const sourceKernel = process.env.SOURCE_KERNEL_VERSION ?? "";
+            // The driver toolkit only needs a kernel whose development
+            // packages can be installed, so it falls back to the kernel the
+            // source image already provides.
+            const dtkKernel = kernelPattern.test(streamKernel)
+              ? streamKernel
+              : sourceKernel;
             const images = [
               {
                 name: "stream-coreos",
@@ -629,8 +691,11 @@ jobs:
             for (const image of images) {
               const prefix = image.prefix;
               const sourceImage = process.env[`${prefix}_SOURCE_IMAGE`];
+              const buildVersion =
+                image.name === "driver-toolkit" ? dtkKernel : streamKernel;
               const labels = {
                 ...commonLabels,
+                "io.okd.source.kernel.version": buildVersion,
                 "org.opencontainers.image.base.name": sourceImage,
                 "org.opencontainers.image.base.digest":
                   process.env[`${prefix}_SOURCE_DIGEST`],
@@ -652,31 +717,61 @@ jobs:
                   process.env[`${prefix}_SOURCE_RPM_BUILD_RUN`],
               };
               const imageRef = `ghcr.io/${owner}/${image.name}:${imageTag}`;
+              if (
+                image.name === "stream-coreos" &&
+                process.env.REPLACE_STREAM_KERNEL !== "true"
+              ) {
+                // The source image already provides the target kernel, so the
+                // overlay build would be a no-op; publish it as the overlay.
+                core.info(
+                  `${sourceImage} already provides kernel ` +
+                  `${process.env.SOURCE_KERNEL_VERSION}; skipping the ` +
+                  `${image.name} overlay build.`
+                );
+                execFileSync(
+                  "skopeo",
+                  [
+                    "copy",
+                    "--all",
+                    `docker://${sourceImage}`,
+                    `docker://${imageRef}`,
+                  ],
+                  { stdio: "inherit" }
+                );
+                continue;
+              }
+              if (!kernelPattern.test(buildVersion)) {
+                core.warning(
+                  `Skipping the ${image.name} overlay: no valid kernel ` +
+                  `version was resolved.`
+                );
+                continue;
+              }
               const args = [
                 "build",
                 "--build-arg",
                 `BASE_IMAGE=${sourceImage}`,
                 "--build-arg",
-                `VERSION=${process.env.KERNEL_VERSION}`,
+                `VERSION=${buildVersion}`,
                 "--build-arg",
                 `STREAM_MAJOR=${process.env.OS_MAJOR}`,
-              ];
-              if (image.name === "stream-coreos") {
-                args.push(
-                  "--build-arg",
-                  `REPLACE_KERNEL=${process.env.REPLACE_STREAM_KERNEL}`
-                );
-              }
-              for (const [key, value] of Object.entries(labels)) {
-                args.push("--label", `${key}=${value ?? "unknown"}`);
-              }
-              args.push(
                 "--file",
                 image.dockerfile,
                 "--tag",
                 imageRef,
                 "."
-              );
+              ];
               execFileSync("podman", args, { stdio: "inherit" });
               execFileSync("podman", ["push", imageRef], { stdio: "inherit" });
+              const labelArgs = [];
+              for (const [key, value] of Object.entries(labels)) {
+                labelArgs.push("--label", `${key}=${value ?? "unknown"}`);
+              }
+              // Apply the provenance labels in the registry; the published
+              // image keeps its layers and history.
+              execFileSync(
+                "crane",
+                ["mutate", ...labelArgs, "--tag", imageRef, imageRef],
+                { stdio: "inherit" }
+              );
             }
