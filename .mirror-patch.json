@@ -1,0 +1,6 @@
+{
+  "id": "openshift-os__release-4.21__okd-os-4.21",
+  "project": "openshift/os",
+  "source_url": "https://github.com/openshift/os.git",
+  "source_branch": "release-4.21"
+}
