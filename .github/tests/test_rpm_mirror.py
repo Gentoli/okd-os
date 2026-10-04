@@ -427,20 +427,25 @@ class MirrorWorkflows(unittest.TestCase):
         self.assertEqual(mirror, [{"version": "4.22", "os_targets": "9"}])
 
     def test_release_matrix_syncs_each_version_once(self):
+        targets = json.loads((self.work / "rpms/mirror-plan.json").read_text())["build_targets"]
+        versions = list(dict.fromkeys(target["okd_version"] for target in targets))
         releases = [{
             "tag_name": f"{version}.1-okd-scos.1",
             "body": "Pull From: quay.io/okd/scos-release@sha256:" + "b" * 64,
             "published_at": "2026-10-03", "draft": False, "prerelease": False,
-        } for version in ("4.22", "4.20")]
+        } for version in versions]
         result = self.run_script(
             script("scan-okd-releases.yml", "release-matrix", "releases"),
             releases=releases)["outputs"]
-        # 4.22 builds EL9 and EL10 from one mirror branch, so the scan syncs it
-        # once and every build leg waits for that single sync.
-        self.assertEqual(json.loads(result["mirror_matrix"]), [
-            {"version": "4.22", "os_targets": "9, 10"},
-            {"version": "4.20", "os_targets": "9"},
-        ])
+        # Each version builds from one mirror branch covering all of its EL
+        # targets, so the scan syncs it once and every build leg waits for
+        # that single sync.
+        expected = []
+        for version in versions:
+            os_targets = sorted({target["os_version"] for target in targets
+                                 if target["okd_version"] == version}, key=int)
+            expected.append({"version": version, "os_targets": ", ".join(os_targets)})
+        self.assertEqual(json.loads(result["mirror_matrix"]), expected)
 
     def test_parallel_rpm_matrices_preserve_sources_and_collectible_artifacts(self):
         supplied = {

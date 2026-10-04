@@ -141,7 +141,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.release-matrix.outputs.source_matrix) }}
     permissions:
-      contents: write
+      contents: read
       copilot-requests: write
     uses: ./.github/workflows/prepare-rpm-sources.yml
     secrets: inherit
@@ -176,7 +176,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.release-matrix.outputs.mirror_matrix) }}
     permissions:
-      contents: write
+      contents: read
       copilot-requests: write
     uses: ./.github/workflows/sync-repo-mirror.yml
     secrets: inherit

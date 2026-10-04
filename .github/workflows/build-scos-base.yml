@@ -22,7 +22,7 @@ concurrency:
 jobs:
   sync-coreos-source:
     permissions:
-      contents: write
+      contents: read
       copilot-requests: write
     uses: ./.github/workflows/sync-repo-mirror.yml
     secrets: inherit

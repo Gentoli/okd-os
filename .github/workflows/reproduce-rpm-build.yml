@@ -51,7 +51,7 @@ jobs:
       matrix:
         project: ${{ fromJSON(needs.source-matrix.outputs.projects) }}
     permissions:
-      contents: write
+      contents: read
       copilot-requests: write
     uses: ./.github/workflows/prepare-rpm-sources.yml
     secrets: inherit

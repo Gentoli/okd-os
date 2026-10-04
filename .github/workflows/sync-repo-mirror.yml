@@ -19,8 +19,10 @@ on:
         description: Private key of the GitHub App used to push mirrored workflow files
         required: true
 
+# All pushes use the minted app token; the job token only reads the checkout
+# and requests Copilot runs.
 permissions:
-  contents: write
+  contents: read
   copilot-requests: write
 
 concurrency:

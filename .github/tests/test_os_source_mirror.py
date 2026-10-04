@@ -402,6 +402,13 @@ class OsSourceMirror(unittest.TestCase):
         ):
             with self.subTest(workflow=name, job=job):
                 self.assertEqual(workflow(name)["jobs"][job]["secrets"], "inherit")
+                job_permissions = workflow(name)["jobs"][job]["permissions"]
+                # All pushes use the minted app token; the job token only
+                # reads the checkout and requests Copilot runs.
+                self.assertEqual(job_permissions["contents"], "read")
+                self.assertEqual(job_permissions["copilot-requests"], "write")
+        self.assertEqual(sync["permissions"]["contents"], "read")
+        self.assertEqual(sync["permissions"]["copilot-requests"], "write")
         self.assertEqual(
             workflow("prepare-rpm-sources.yml")["on"]["workflow_call"]["secrets"],
             sync["on"]["workflow_call"]["secrets"],
