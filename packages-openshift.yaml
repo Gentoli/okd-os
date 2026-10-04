@@ -34,7 +34,6 @@ conditional-include:
         - c9s-baseos
         - c9s-appstream
         - c9s-sig-nfv
-        - c9s-sig-cloud-okd
         # XXX: this shouldn't be here; see related XXX in build-node-image.sh
         - rhel-9.6-server-ose-4.21-okd
   - if: osversion == "centos-10"

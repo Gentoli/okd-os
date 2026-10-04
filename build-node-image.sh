@@ -14,10 +14,15 @@ if [ "${OPENSHIFT_CI}" != 0 ]; then
     /run/src/ci/get-ocp-repo.sh /etc/yum.repos.d/ocp.repo
 fi
 
-# add all the repos from the src repo into `/etc/yum.repos.d` so dnf sees them
-cat /run/src/*.repo >> /etc/yum.repos.d/git.repo
-
 source /etc/os-release
+
+# add repos from the src repo into `/etc/yum.repos.d` so dnf sees them
+if [ "$ID" = centos ]; then
+    centos_major_version=${VERSION_ID%%.*}
+    cat "/run/src/c${centos_major_version}s.repo" >> /etc/yum.repos.d/git.repo
+else
+    cat /run/src/*.repo >> /etc/yum.repos.d/git.repo
+fi
 
 # XXX: For SCOS, only allow certain packages to come from ART; everything else
 # should come from CentOS. We should eventually sever this.
