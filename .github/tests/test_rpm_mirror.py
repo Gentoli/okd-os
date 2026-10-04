@@ -157,6 +157,9 @@ class MirrorWorkflows(unittest.TestCase):
         self.commit(checkout, "PATCH/" + request["source_branch"])
         (checkout / "compatibility").write_text("target adaptation\n")
         self.commit(checkout, "Adapt target")
+        # Published stacks carry their size so a truncated mirror stays detectable.
+        self.git("commit", "--amend", "--no-edit",
+                 "--trailer", "Mirror-Stack: 2", cwd=checkout)
         self.git("push", str(self.remote), f"HEAD:refs/heads/{request['target_branch']}", cwd=checkout)
         return checkout
 
@@ -241,6 +244,15 @@ class MirrorWorkflows(unittest.TestCase):
         self.seed_mirror(request)
         self.assertEqual(self.prepare(request)["outputs"], {"update": "false"})
 
+    def test_truncated_mirror_without_stack_trailer_reruns_maintenance(self):
+        request = self.request()
+        checkout = self.seed_mirror(request)
+        # A partially published stack loses the trailer-bearing head commit.
+        marker = self.git("rev-parse", "HEAD^", cwd=checkout)
+        self.git("push", "--force", str(self.remote),
+                 f"{marker}:refs/heads/{request['target_branch']}", cwd=checkout)
+        self.assertEqual(self.prepare(request)["outputs"]["update"], "true")
+
     def agent_report(self, output):
         self.env.update({"GITHUB_WORKSPACE": str(ROOT), "WORKTREE": str(self.work)})
         (self.runner_temp / "source-mirror-context.json").write_text(json.dumps({
@@ -298,9 +310,14 @@ class MirrorWorkflows(unittest.TestCase):
         self.git("checkout", "--detach", "refs/remotes/mirror-upstream/base", cwd=worktree)
         self.git("cherry-pick", f"{self.base}..{old_head}", cwd=worktree)
         self.assertEqual(self.git("merge-base", new_base, "HEAD", cwd=worktree), new_base)
-        self.env.update({"WORKTREE": worktree, "OLD_HEAD": old_head,
-                         "STAGING_BRANCH": prepared["staging_branch"],
-                         "COMMITS": self.git("rev-list", "--reverse", f"{new_base}..HEAD", cwd=worktree).replace("\n", " ")})
+        self.env.update({
+            "WORKTREE": worktree,
+            "OLD_HEAD": old_head,
+            "BASE": new_base,
+            "UNSIGNED_HEAD": self.git("rev-parse", "HEAD", cwd=worktree),
+            "STAGING_BRANCH": prepared["staging_branch"],
+            "COMMITS": self.git("rev-list", "--reverse", f"{new_base}..HEAD", cwd=worktree).replace("\n", " "),
+        })
         stage = self.run_script(script("sync-repo-mirror.yml", "sync", "stage"))
         self.assertNotIn("error", stage)
         self.assertEqual(
@@ -323,6 +340,12 @@ class MirrorWorkflows(unittest.TestCase):
             self.git("--git-dir", str(self.remote), "rev-parse",
                      f"refs/heads/{request['target_branch']}"),
             head,
+        )
+        self.assertEqual(
+            self.git("--git-dir", str(self.remote), "log", "-1",
+                     "--format=%(trailers:key=Mirror-Stack,valueonly)",
+                     f"refs/heads/{request['target_branch']}"),
+            "2",
         )
         # Another writer advances the mirror before a stale publisher retries.
         self.git("fetch", str(self.remote), f"refs/heads/{request['target_branch']}", cwd=existing)

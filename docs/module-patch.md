@@ -24,9 +24,13 @@ from `main`. The first commit after upstream has the subject
 names carry the source EL/OKD version. Neither SHAs nor RPM `Release:` values
 form part of the identity.
 
-Compatibility commits follow the identity commit. The workflow checks whether
-the fetched upstream head is an ancestor of the mirror head to determine
-freshness. Current mirrors skip the agent and publication steps.
+Compatibility commits follow the identity commit. Every published stack head
+carries a `Mirror-Stack: <count>` trailer recording its commit count after the
+upstream base; the workflow adds it and replaces any replayed trailer. A mirror
+is fresh only when the fetched upstream head is an ancestor of the mirror head
+and that trailer matches the count found there. A truncated or partially
+published stack therefore fails the comparison and reruns maintenance, while
+fresh mirrors skip the agent and publication steps.
 
 ## Generic creation and update recipe
 
@@ -78,12 +82,14 @@ observed mirror head (or requiring absence on creation).
 This permits rebased patches while retaining upstream commit IDs. FIXME:
 GitHub's signed-commit API refuses histories that contain executable files
 ([community discussion](https://github.com/orgs/community/discussions/191953)),
-which affects `openshift/os` mirrors carrying `build-node-image.sh`, so a
-signing failure falls back to publishing the agent's unsigned commits with a
-warning. Another writer causes the lease to reject publication; rerun
-preparation against the new state. The temporary branch is removed on success
-or failure. Concurrency is scoped to the mirror branch, with queued calls for
-that branch. Native shared sources skip mirror sync.
+which affects `openshift/os` mirrors carrying `build-node-image.sh`. The signer
+can then publish only a prefix of the patch stack while still reporting an OID,
+so publication verifies that the signed history contains every staged commit
+and otherwise falls back to the agent's unsigned commits with a warning.
+Another writer causes the lease to reject publication; rerun preparation against
+the new state. The temporary branch is removed on success or failure.
+Concurrency is scoped to the mirror branch, with queued calls for that branch.
+Native shared sources skip mirror sync.
 
 ## CRI-O EL9 example
 

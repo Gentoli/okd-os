@@ -108,14 +108,28 @@ jobs:
             } catch (error) {
               if (error.status !== 2) throw error;
             }
+            // Every stack this workflow publishes records its size in a
+            // Mirror-Stack trailer on the head commit, so a truncated or
+            // partially published stack stays detectable from the mirror alone.
+            const stackTrailer = (revision) => git(["log", "-1",
+              "--format=%(trailers:key=Mirror-Stack,valueonly)", revision]);
             if (oldHead) {
+              let current = false;
               try {
                 git(["merge-base", "--is-ancestor", sourceRef, targetRef]);
+                current = true;
+              } catch (error) {
+                if (error.status !== 1) throw error;
+              }
+              if (current && stackTrailer(targetRef) ===
+                  git(["rev-list", "--count", targetRef, `^${sourceRef}`])) {
                 core.setOutput("update", "false");
                 core.info(`${mirror.target_branch} already incorporates ${sourceBranch}`);
                 return;
-              } catch (error) {
-                if (error.status !== 1) throw error;
+              }
+              if (current) {
+                core.warning(`${mirror.target_branch} is missing its Mirror-Stack ` +
+                  "trailer or contains an incomplete stack; rerunning maintenance");
               }
             }
             const referenceRef = mirror.reference_branch
@@ -241,12 +255,21 @@ jobs:
             }).trim();
             const commits = process.env.COMMITS.split(" ");
             const base = git(["rev-parse", `${commits[0]}^`]);
-            const head = commits.at(-1);
+            // Record the prepared stack size on its head commit.
+            git(["checkout", "--detach", commits.at(-1)]);
+            git(["-c", "trailer.ifexists=replace", "commit", "--amend", "--no-edit",
+              "--trailer", `Mirror-Stack: ${commits.length}`]);
+            const head = git(["rev-parse", "HEAD"]);
+            if (git(["log", "-1", "--format=%(trailers:key=Mirror-Stack,valueonly)"]) !==
+                String(commits.length)) {
+              throw new Error("Could not record the mirror stack size on its head commit");
+            }
             const auth = Buffer.from(`x-access-token:${process.env.GITHUB_TOKEN}`).toString("base64");
             core.setSecret(auth);
             git(["-c", `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`,
               "push", "mirror-target", `${base}:refs/heads/${process.env.STAGING_BRANCH}`]);
             core.setOutput("revision", `${base}..${head}`);
+            core.setOutput("base", base);
             core.setOutput("head", head);
 
       - name: Sign agent-created patch commits
@@ -274,6 +297,7 @@ jobs:
           WORKTREE: ${{ steps.prepare.outputs.worktree }}
           OLD_HEAD: ${{ steps.prepare.outputs.old_head }}
           STAGING_BRANCH: ${{ steps.prepare.outputs.staging_branch }}
+          BASE: ${{ steps.stage.outputs.base }}
           UNSIGNED_HEAD: ${{ steps.stage.outputs.head }}
           SIGNED_HEAD: ${{ steps.sign.outputs.pushed-oid }}
         with:
@@ -286,13 +310,30 @@ jobs:
               `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`, ...args], {
               cwd: process.env.WORKTREE, stdio: ["ignore", "pipe", "pipe"],
             });
-            git(["fetch", "--no-tags", "mirror-target", `refs/heads/${process.env.STAGING_BRANCH}`]);            const signedHead = process.env.SIGNED_HEAD;
+            const output = (args) => git(args).toString().trim();
+            git(["fetch", "--no-tags", "mirror-target", `refs/heads/${process.env.STAGING_BRANCH}`]);
+            let head = process.env.UNSIGNED_HEAD;
+            const signedHead = process.env.SIGNED_HEAD;
             if (!signedHead) {
               // FIXME: the signing action rejects histories with executable
               // files, so publish the agent's unsigned commits instead.
               core.warning("Signed commits are unavailable; publishing unsigned commits");
+            } else {
+              try {
+                // FIXME: the signing action can push a prefix of the stack and
+                // still report an OID, so trust it only when it recreated every
+                // staged commit.
+                const stackSize = (revision) => Number(
+                  output(["rev-list", "--count", revision, `^${process.env.BASE}`]));
+                if (stackSize(signedHead) === stackSize(head)) {
+                  head = signedHead;
+                } else {
+                  core.warning("Signed commits are incomplete; publishing unsigned commits");
+                }
+              } catch (error) {
+                core.warning(`Signed commits are unusable (${error.message}); publishing unsigned commits`);
+              }
             }
-            const head = signedHead || process.env.UNSIGNED_HEAD;
             git(["push", `--force-with-lease=refs/heads/${mirror.target_branch}:${process.env.OLD_HEAD}`,
               "mirror-target", `${head}:refs/heads/${mirror.target_branch}`]);
             core.info(`Published ${mirror.target_branch} at ${head}`);

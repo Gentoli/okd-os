@@ -150,6 +150,8 @@ class OsSourceMirror(unittest.TestCase):
         self.commit(checkout, f"PATCH/{source_branch}")
         (checkout / "compatibility").write_text("target adaptation\n")
         self.commit(checkout, "Adapt target")
+        self.git("commit", "--amend", "--no-edit",
+                 "--trailer", "Mirror-Stack: 2", cwd=checkout)
         self.git(
             "push",
             str(self.remote),
@@ -263,15 +265,25 @@ class OsSourceMirror(unittest.TestCase):
         self.env.update({
             "MIRROR": json.dumps(request),
             "OLD_HEAD": "",
+            "BASE": self.base,
             "SIGNED_HEAD": "",
             "UNSIGNED_HEAD": patch_oid,
         })
-        self.assertNotIn("error", self.run_script(self.publish_script()))
-        self.assertEqual(
-            self.git("--git-dir", str(self.remote), "rev-parse",
-                     f"refs/heads/{request['target_branch']}"),
-            patch_oid,
-        )
+        publish = self.publish_script()
+        # The signer either produces nothing or, as with executable files, a
+        # prefix of the stack; both must publish the complete unsigned history.
+        for signed, old_head in (("", ""), (marker_oid, patch_oid)):
+            with self.subTest(signed_head=signed):
+                self.env.update({
+                    "SIGNED_HEAD": signed,
+                    "OLD_HEAD": old_head,
+                })
+                self.assertNotIn("error", self.run_script(publish))
+                self.assertEqual(
+                    self.git("--git-dir", str(self.remote), "rev-parse",
+                             f"refs/heads/{request['target_branch']}"),
+                    patch_oid,
+                )
 
     def test_publish_creates_branch_and_lease_rejects_concurrent_creation(self):
         request = self.request()
@@ -315,6 +327,8 @@ class OsSourceMirror(unittest.TestCase):
         self.env.update({
             "MIRROR": json.dumps(request),
             "OLD_HEAD": "",
+            "BASE": self.base,
+            "UNSIGNED_HEAD": patch_oid,
             "SIGNED_HEAD": patch_oid,
         })
         publish = self.publish_script()
