@@ -53,8 +53,8 @@ jobs:
     permissions:
       contents: write
       copilot-requests: write
-      workflows: write
     uses: ./.github/workflows/prepare-rpm-sources.yml
+    secrets: inherit
     with:
       okd_version: ${{ inputs.okd_version }}
       os_version: ${{ inputs.os_version }}

@@ -67,11 +67,19 @@ lease-publication flow. The identity marker defaults to `.mirror-patch.json`.
 RPM requests add `docs/module-patch.md` and packaging instructions; OS source
 requests add their repository instructions.
 
-Sync uses one job with `contents: write`, `copilot-requests: write`,
-`workflows: write`, inline
+Sync uses one job with `contents: write`, `copilot-requests: write`, inline
 `github-script` preparation, and Copilot CLI with `--model gpt-6-luna`. There
 is no post-agent content validation. The organization policy must permit
 [Copilot CLI requests in Actions](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions).
+
+Mirrored sources can contain workflow files (e.g. rhel-coreos-config's
+`find-whitespace.yml`), which the default `GITHUB_TOKEN` cannot create or
+update. Sync mints a push token from a GitHub App via
+[actions/create-github-app-token](https://github.com/actions/create-github-app-token)
+with `contents: write` and `workflows: write`, so every caller must forward
+the `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY` secrets
+(`secrets: inherit`). The app must be installed on the repository with
+Contents and Workflows (read and write) access.
 
 ## Signed publication
 

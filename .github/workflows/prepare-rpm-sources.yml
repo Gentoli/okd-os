@@ -16,6 +16,13 @@ on:
         description: Unique source artifact for this package and target
         required: true
         type: string
+    secrets:
+      MIRROR_APP_ID:
+        description: Client ID of the GitHub App used to push mirrored workflow files
+        required: true
+      MIRROR_APP_PRIVATE_KEY:
+        description: Private key of the GitHub App used to push mirrored workflow files
+        required: true
 
 permissions:
   contents: read
@@ -93,8 +100,8 @@ jobs:
     permissions:
       contents: write
       copilot-requests: write
-      workflows: write
     uses: ./.github/workflows/sync-repo-mirror.yml
+    secrets: inherit
     with:
       mirror: ${{ needs.select.outputs.mirror }}
       repository_instructions: |

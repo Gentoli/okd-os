@@ -364,29 +364,48 @@ class OsSourceMirror(unittest.TestCase):
     def test_builders_use_the_shared_mirror_and_sync_every_version(self):
         sync = workflow("sync-repo-mirror.yml")
         self.assertEqual(
-            sync["permissions"],
-            {"contents": "write", "copilot-requests": "write", "workflows": "write"},
+            sync["on"]["workflow_call"]["secrets"],
+            {
+                "MIRROR_APP_ID": {
+                    "description": "Client ID of the GitHub App used to push mirrored workflow files",
+                    "required": "true",
+                },
+                "MIRROR_APP_PRIVATE_KEY": {
+                    "description": "Private key of the GitHub App used to push mirrored workflow files",
+                    "required": "true",
+                },
+            },
         )
-        sync_callers = {
-            "build-scos-base.yml": "sync-coreos-source",
-            "prepare-rpm-sources.yml": "sync",
-            "scan-okd-releases.yml": "sync-os-source",
-        }
-        for name, job in sync_callers.items():
-            with self.subTest(workflow=name):
-                job_permissions = workflow(name)["jobs"][job]["permissions"]
-                self.assertEqual(job_permissions["contents"], "write")
-                self.assertEqual(job_permissions["copilot-requests"], "write")
-                # Mirrored sources can contain workflow files, and the
-                # staging-branch seed push is rejected without this scope.
-                self.assertEqual(job_permissions["workflows"], "write")
+        push_token = next(
+            step for step in sync["jobs"]["sync"]["steps"]
+            if step.get("id") == "push-token"
+        )
+        self.assertEqual(push_token["uses"], "actions/create-github-app-token@v3.2.0")
+        self.assertEqual(push_token["with"]["permission-contents"], "write")
+        self.assertEqual(push_token["with"]["permission-workflows"], "write")
+        for step_name in (
+            "Seed temporary publishing branch",
+            "Publish mirror with a lease",
+        ):
+            with self.subTest(step=step_name):
+                step = next(
+                    s for s in sync["jobs"]["sync"]["steps"]
+                    if s.get("name") == step_name
+                )
+                self.assertEqual(step["env"]["PUSH_TOKEN"], "${{ steps.push-token.outputs.token }}")
         for name, job in (
+            ("build-scos-base.yml", "sync-coreos-source"),
+            ("prepare-rpm-sources.yml", "sync"),
+            ("scan-okd-releases.yml", "sync-os-source"),
             ("scan-okd-releases.yml", "prepare-rpm-sources"),
             ("reproduce-rpm-build.yml", "prepare-rpm-sources"),
         ):
-            with self.subTest(workflow=name):
-                job_permissions = workflow(name)["jobs"][job]["permissions"]
-                self.assertEqual(job_permissions["workflows"], "write")
+            with self.subTest(workflow=name, job=job):
+                self.assertEqual(workflow(name)["jobs"][job]["secrets"], "inherit")
+        self.assertEqual(
+            workflow("prepare-rpm-sources.yml")["on"]["workflow_call"]["secrets"],
+            sync["on"]["workflow_call"]["secrets"],
+        )
         base = workflow("build-scos-base.yml")
         base_jobs = base["jobs"]
         self.assertEqual(

@@ -11,14 +11,17 @@ on:
         description: Repository-specific maintenance instructions appended to the shared prompt
         required: false
         type: string
+    secrets:
+      MIRROR_APP_ID:
+        description: Client ID of the GitHub App used to push mirrored workflow files
+        required: true
+      MIRROR_APP_PRIVATE_KEY:
+        description: Private key of the GitHub App used to push mirrored workflow files
+        required: true
 
 permissions:
   contents: write
   copilot-requests: write
-  # Mirrored sources can contain workflow files (e.g. rhel-coreos-config's
-  # find-whitespace.yml), and the staging-branch seed push is rejected
-  # without this scope.
-  workflows: write
 
 concurrency:
   group: source-mirror-${{ fromJSON(inputs.mirror).target_branch }}
@@ -267,16 +270,30 @@ jobs:
             }
             core.setOutput("commits", commits.join(" "));
 
+      - name: Mint mirror push token
+        id: push-token
+        if: steps.agent.outputs.commits != ''
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ secrets.MIRROR_APP_ID }}
+          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
+
       - name: Seed temporary publishing branch
         id: stage
         if: steps.agent.outputs.commits != ''
         uses: actions/github-script@v9
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          # Mirrored sources can contain workflow files, which the default
+          # GITHUB_TOKEN cannot create or update. The app token carries the
+          # workflows scope for the seed push.
+          PUSH_TOKEN: ${{ steps.push-token.outputs.token }}
           WORKTREE: ${{ steps.prepare.outputs.worktree }}
           COMMITS: ${{ steps.agent.outputs.commits }}
           STAGING_BRANCH: ${{ steps.prepare.outputs.staging_branch }}
         with:
+          github-token: ${{ steps.push-token.outputs.token }}
           script: |
             const { execFileSync } = require("node:child_process");
             const git = (args) => execFileSync("git", args, {
@@ -293,7 +310,10 @@ jobs:
                 String(commits.length)) {
               throw new Error("Could not record the mirror stack size on its head commit");
             }
-            const auth = Buffer.from(`x-access-token:${process.env.GITHUB_TOKEN}`).toString("base64");
+            // Mirrored sources can contain workflow files, which the default
+            // GITHUB_TOKEN cannot create or update; the app push token
+            // carries the workflows scope.
+            const auth = Buffer.from(`x-access-token:${process.env.PUSH_TOKEN}`).toString("base64");
             core.setSecret(auth);
             git(["-c", `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`,
               "push", "mirror-target", `${base}:refs/heads/${process.env.STAGING_BRANCH}`]);
@@ -315,13 +335,13 @@ jobs:
           repository: ${{ github.repository }}
           branch: ${{ steps.prepare.outputs.staging_branch }}
           revision: ${{ steps.stage.outputs.revision }}
-          github-token: ${{ github.token }}
+          github-token: ${{ steps.push-token.outputs.token }}
 
       - name: Publish mirror with a lease
         if: steps.agent.outputs.commits != ''
         uses: actions/github-script@v9
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          PUSH_TOKEN: ${{ steps.push-token.outputs.token }}
           MIRROR: ${{ inputs.mirror }}
           WORKTREE: ${{ steps.prepare.outputs.worktree }}
           OLD_HEAD: ${{ steps.prepare.outputs.old_head }}
@@ -330,10 +350,11 @@ jobs:
           UNSIGNED_HEAD: ${{ steps.stage.outputs.head }}
           SIGNED_HEAD: ${{ steps.sign.outputs.pushed-oid }}
         with:
+          github-token: ${{ steps.push-token.outputs.token }}
           script: |
             const { execFileSync } = require("node:child_process");
             const mirror = JSON.parse(process.env.MIRROR);
-            const auth = Buffer.from(`x-access-token:${process.env.GITHUB_TOKEN}`).toString("base64");
+            const auth = Buffer.from(`x-access-token:${process.env.PUSH_TOKEN}`).toString("base64");
             core.setSecret(auth);
             const git = (args) => execFileSync("git", ["-c",
               `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`, ...args], {
@@ -373,6 +394,7 @@ jobs:
         env:
           STAGING_BRANCH: ${{ steps.prepare.outputs.staging_branch }}
         with:
+          github-token: ${{ steps.push-token.outputs.token }}
           script: |
             try {
               await github.rest.git.deleteRef({ ...context.repo, ref: `heads/${process.env.STAGING_BRANCH}` });
