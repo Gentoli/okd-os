@@ -1,0 +1,6 @@
+{
+  "id": "cri-o__c10s-sig-cloud-okd-4.22__el9-okd4.22",
+  "project": "cri-o",
+  "source_url": "https://gitlab.com/CentOS/cloud/rpms/cri-o.git",
+  "source_branch": "c10s-sig-cloud-okd-4.22"
+}
