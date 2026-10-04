@@ -30,6 +30,7 @@ jobs:
     outputs:
       matrix: ${{ steps.releases.outputs.matrix }}
       source_matrix: ${{ steps.releases.outputs.source_matrix }}
+      mirror_matrix: ${{ steps.releases.outputs.mirror_matrix }}
     steps:
       - uses: actions/checkout@v4
       - name: Find the latest stable OKD release payloads
@@ -116,6 +117,15 @@ jobs:
               });
             }
             core.setOutput("matrix", JSON.stringify(matrix));
+            const mirrorMatrix = versions.map((version) => ({
+              version,
+              os_targets: matrix
+                .filter((entry) => entry.version === version)
+                .map((entry) => Number(entry.os_major))
+                .sort((left, right) => left - right)
+                .join(", "),
+            }));
+            core.setOutput("mirror_matrix", JSON.stringify(mirrorMatrix));
             const sourceMatrix = matrix.flatMap((release) => plan.sources.projects.map((project) => ({
               okd_version: release.version,
               os_version: release.os_major,
@@ -157,8 +167,54 @@ jobs:
           targets: ${{ needs.release-matrix.outputs.matrix }}
           sources: ${{ steps.sources.outputs.sources }}
 
+  sync-os-source:
+    name: Maintain okd/os-${{ matrix.version }} mirror
+    needs: release-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.release-matrix.outputs.mirror_matrix) }}
+    permissions:
+      contents: write
+      copilot-requests: write
+    uses: ./.github/workflows/sync-repo-mirror.yml
+    with:
+      mirror: >-
+        {
+          "project": "openshift/os",
+          "source_url": "https://github.com/openshift/os.git",
+          "source_branch": "release-${{ matrix.version }}",
+          "target_branch": "okd/os-${{ matrix.version }}",
+          "target_version": "${{ matrix.version }}",
+          "reference_branch": "${{ matrix.version == '4.22' && 'release-4.20' || '' }}"
+        }
+      repository_instructions: |
+        - Target EL versions: ${{ matrix.os_targets }}. Maintain this mirror
+          once for all of them.
+        - Rewind `openshift/os` history until it contains the definitions for
+          each listed EL (`centos-<N>` conditionals and `c<N>s.repo`), restore
+          them, then apply the changes made since their removal: keep the
+          current release's package requirements and postprocessing, and bring
+          repository IDs, package sets, and selection logic up to date for each
+          EL.
+        - When the branch still defines a RHEL build for a listed EL
+          (`rhel-<version>` conditionals and repositories), treat the changes
+          between those RHEL definitions and the removed `centos-<N>`
+          definitions as the changes to carry into the restored definitions.
+        - Use `reference_ref`, when present, as an additional reference for the
+          requested EL conditionals and repository IDs. Do not carry over an
+          older Cloud SIG runtime repository; the caller workflow supplies the
+          local repository with the built RPMs.
+        - Restore `build-node-image.sh` repository-file selection so each listed
+          EL's `osversion=centos-<N>` loads `c<N>s.repo` while other EL versions
+          keep their own repository files.
+        - Do not modify `build-node-image.sh` for the local built-RPM allowlist;
+          the caller workflow handles that local repository configuration.
+        - Produce only the identity marker when the branch already supports
+          every listed EL.
+
   build:
-    needs: compose-build-configs
+    needs: [compose-build-configs, sync-os-source]
     strategy:
       fail-fast: false
       matrix:

@@ -302,7 +302,7 @@ class OsSourceMirror(unittest.TestCase):
             concurrent_head,
         )
 
-    def test_builders_use_the_shared_mirror_and_gate_open_shift_sync(self):
+    def test_builders_use_the_shared_mirror_and_sync_every_version(self):
         base = workflow("build-scos-base.yml")
         base_jobs = base["jobs"]
         self.assertEqual(
@@ -322,15 +322,9 @@ class OsSourceMirror(unittest.TestCase):
         self.assertEqual(coreos_checkout["with"]["ref"], "coreos/c9s")
 
         okd = workflow("build-okd-stream-coreos.yml")["jobs"]
+        self.assertNotIn("sync-openshift-os-source", okd)
         self.assertEqual(
-            okd["sync-openshift-os-source"]["if"],
-            "needs.resolve-source.outputs.compose == 'true'",
-        )
-        self.assertIn("sync-openshift-os-source", okd["compose-base-image"]["needs"])
-        self.assertIn(
-            "centos-9",
-            okd["sync-openshift-os-source"]["with"]["repository_instructions"],
-        )
+            okd["compose-base-image"]["needs"], ["resolve-source", "build-rpms"])
         os_checkout = next(
             step for step in okd["compose-base-image"]["steps"]
             if step.get("name") == "Checkout matching openshift/os source"
@@ -338,6 +332,16 @@ class OsSourceMirror(unittest.TestCase):
         self.assertEqual(os_checkout["with"]["ref"], "okd/os-${{ inputs.version }}")
 
         scan = workflow("scan-okd-releases.yml")
+        os_sync = scan["jobs"]["sync-os-source"]
+        self.assertEqual(os_sync["uses"], "./.github/workflows/sync-repo-mirror.yml")
+        self.assertEqual(
+            os_sync["strategy"]["matrix"]["include"],
+            "${{ fromJSON(needs.release-matrix.outputs.mirror_matrix) }}",
+        )
+        self.assertIn("sync-os-source", scan["jobs"]["build"]["needs"])
+        instructions = os_sync["with"]["repository_instructions"]
+        self.assertIn("Target EL versions: ${{ matrix.os_targets }}", instructions)
+        self.assertIn("rhel", instructions)
         self.assertEqual(scan["on"]["schedule"][0]["cron"], "17 6 1,15 * *")
         self.assertEqual(scan["jobs"]["build"]["permissions"]["contents"], "write")
         self.assertEqual(scan["jobs"]["build"]["permissions"]["copilot-requests"], "write")

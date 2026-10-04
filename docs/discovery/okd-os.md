@@ -81,25 +81,30 @@ repository.
 
 ## Branch-based compatibility workflow
 
-Fallback composition now calls the shared
+The release scan maintains the shared
 [`sync-repo-mirror.yml`](../../.github/workflows/sync-repo-mirror.yml) workflow
-only after release-image resolution says a source compose is required. It
+once per OKD version: a `sync-os-source` matrix over the version's EL targets
 checks `openshift/os:release-<version>` against
-`Gentoli/okd-os:okd/os-<version>` and updates the mirror before the compose job
-checks it out. Builds that use a matching release `stream-coreos` image skip
-both mirror sync and fallback composition. These checks run through existing
-release-scan and builder triggers; there is no independent mirror schedule.
+`Gentoli/okd-os:okd/os-<version>` and updates the mirror before any build leg
+checks it out. Every EL target of a version shares one mirror branch, so the
+scan derives a single entry per version and the build job waits for it. Only
+fallback composition remains gated on release-image resolution, so builds that
+use a matching release `stream-coreos` image still maintain the OS mirror. These
+checks run through existing release-scan triggers; there is no independent
+mirror schedule.
 
 The OS mirror request injects OS-specific maintenance instructions into the
 shared `.github/prompts/source-mirror-maintenance.md` prompt and uses the
-general `.mirror-patch.json` identity marker. For 4.22 it also fetches
-`release-4.20` as the reference for the CentOS 9 conditional and repository
-IDs. The prompt maintains the 4.22 manifest and EL9 repository changes as
-compatibility commits on `okd/os-4.22`; it selects `c9s.repo` for
-`centos-9`, preserves the package set and postprocessing, and does not reuse the
-4.20 Cloud SIG runtime repository. The compose workflow separately adds
-`cri-o`, `cri-tools`, and `conmon-rs` to the local `includepkgs` allowlist
-while retaining the credential-provider entries.
+general `.mirror-patch.json` identity marker. The injected instructions list the
+version's EL targets, so for 4.22 the prompt rewinds `openshift/os` history to
+the removed `centos-9` and `c9s.repo` definitions, restores them, then applies
+the changes made since their removal — referencing the RHEL build definitions
+when the branch still carries them — while preserving the current package set
+and postprocessing and not reusing the older Cloud SIG runtime repository. For
+4.22 it also fetches `release-4.20` as the reference for EL9 conditionals and
+repository IDs. The compose workflow separately adds `cri-o`, `cri-tools`, and
+`conmon-rs` to the local `includepkgs` allowlist while retaining the
+credential-provider entries.
 
 ## Verification still needed
 

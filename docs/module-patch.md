@@ -136,7 +136,7 @@ With Python 3, PyYAML, Node.js, and Git installed, run
 workflow scripts against local repositories, exercising source selection,
 upstream ancestry, patch replay, publication leases, and artifact collection.
 `test_os_source_mirror.py` also verifies default-branch resolution, OS mirror
-requests, the EL9 reference branch, and fallback-only sync gating. These tests
+requests, the EL9 reference branch, and per-version OS mirror synchronization. These tests
 do not make Copilot requests or publish remote branches.
 
 Actionlint 1.7.12 does not recognize the documented

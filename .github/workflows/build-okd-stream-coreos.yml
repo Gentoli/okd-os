@@ -234,45 +234,10 @@ jobs:
       sig_matrix: ${{ inputs.sig_matrix }}
       run_test: ${{ inputs.run_test }}
 
-  sync-openshift-os-source:
-    needs: resolve-source
-    if: needs.resolve-source.outputs.compose == 'true'
-    permissions:
-      contents: write
-      copilot-requests: write
-    uses: ./.github/workflows/sync-repo-mirror.yml
-    with:
-      mirror: >-
-        {
-          "project": "openshift/os",
-          "source_url": "https://github.com/openshift/os.git",
-          "source_branch": "release-${{ inputs.version }}",
-          "target_branch": "okd/os-${{ inputs.version }}",
-          "target_version": "${{ inputs.version }}",
-          "reference_branch": "${{ inputs.version == '4.22' && 'release-4.20' || '' }}"
-        }
-      repository_instructions: |
-        - For target version 4.22, restore the `centos-9` conditional in
-          `packages-openshift.yaml` while preserving the existing 4.22 package
-          requirements and postprocessing.
-        - Use `reference_ref` as the reference for the CentOS 9 conditional and
-          `c9s.repo` repository IDs. Define the EL9 BaseOS, AppStream, and
-          appropriate NFV repositories, plus the local repository used for the
-          built 4.22 RPMs. Do not carry over the 4.20 Cloud SIG repository as
-          the source of 4.22 runtime packages.
-        - Update `build-node-image.sh` repository-file selection so
-          `osversion=centos-9` loads `c9s.repo`, while CentOS 10 continues to
-          load `c10s.repo`.
-        - Do not modify `build-node-image.sh` for the local built-RPM allowlist;
-          the caller workflow handles that local repository configuration.
-        - Other target versions receive an identity marker only unless their run
-          context explicitly includes a compatibility change.
-
   compose-base-image:
     needs:
       - resolve-source
       - build-rpms
-      - sync-openshift-os-source
     if: needs.resolve-source.outputs.compose == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
