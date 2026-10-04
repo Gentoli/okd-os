@@ -62,6 +62,7 @@ Requires:       container-selinux
 %endif
 Requires:       containers-common >= 1:0.1.31-14
 Recommends:     runc >= 1.0.0-16
+Suggests:       containernetworking-plugins >= 1.0.0-1
 Requires:       conmon >= 2.0.2-1
 Requires:       socat
 
@@ -120,6 +121,7 @@ sed -i 's/\/local//' contrib/systemd/%{service_name}.service
 bin/%{service_name} \
       --selinux \
       --cni-plugin-dir /opt/cni/bin \
+      --cni-plugin-dir "%{_libexecdir}/cni" \
       --enable-metrics \
       --metrics-port 9537 \
       config > %{service_name}.conf
