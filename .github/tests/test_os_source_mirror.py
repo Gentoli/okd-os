@@ -362,6 +362,31 @@ class OsSourceMirror(unittest.TestCase):
         )
 
     def test_builders_use_the_shared_mirror_and_sync_every_version(self):
+        sync = workflow("sync-repo-mirror.yml")
+        self.assertEqual(
+            sync["permissions"],
+            {"contents": "write", "copilot-requests": "write", "workflows": "write"},
+        )
+        sync_callers = {
+            "build-scos-base.yml": "sync-coreos-source",
+            "prepare-rpm-sources.yml": "sync",
+            "scan-okd-releases.yml": "sync-os-source",
+        }
+        for name, job in sync_callers.items():
+            with self.subTest(workflow=name):
+                job_permissions = workflow(name)["jobs"][job]["permissions"]
+                self.assertEqual(job_permissions["contents"], "write")
+                self.assertEqual(job_permissions["copilot-requests"], "write")
+                # Mirrored sources can contain workflow files, and the
+                # staging-branch seed push is rejected without this scope.
+                self.assertEqual(job_permissions["workflows"], "write")
+        for name, job in (
+            ("scan-okd-releases.yml", "prepare-rpm-sources"),
+            ("reproduce-rpm-build.yml", "prepare-rpm-sources"),
+        ):
+            with self.subTest(workflow=name):
+                job_permissions = workflow(name)["jobs"][job]["permissions"]
+                self.assertEqual(job_permissions["workflows"], "write")
         base = workflow("build-scos-base.yml")
         base_jobs = base["jobs"]
         self.assertEqual(

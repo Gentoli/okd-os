@@ -122,8 +122,10 @@ than reusable workflow outputs that can overwrite one another.
 ### 3. Implement mirror sync as one job
 
 Add `sync-repo-mirror.yml`, accepting one mirror request rather than an array
-whose length must be checked repeatedly. Grant `contents: write` and
-`copilot-requests: write`. Use branch-specific concurrency to serialize writes
+whose length must be checked repeatedly. Grant `contents: write`,
+`copilot-requests: write`, and `workflows: write` (mirrored sources can
+contain workflow files, and the staging-branch seed push is rejected without
+it). Use branch-specific concurrency to serialize writes
 to the same mirror while unrelated packages proceed.
 Remove the attempt's global preparation/sync concurrency groups.
 

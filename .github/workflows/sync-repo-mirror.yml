@@ -15,6 +15,10 @@ on:
 permissions:
   contents: write
   copilot-requests: write
+  # Mirrored sources can contain workflow files (e.g. rhel-coreos-config's
+  # find-whitespace.yml), and the staging-branch seed push is rejected
+  # without this scope.
+  workflows: write
 
 concurrency:
   group: source-mirror-${{ fromJSON(inputs.mirror).target_branch }}

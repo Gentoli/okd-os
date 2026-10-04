@@ -67,7 +67,8 @@ lease-publication flow. The identity marker defaults to `.mirror-patch.json`.
 RPM requests add `docs/module-patch.md` and packaging instructions; OS source
 requests add their repository instructions.
 
-Sync uses one job with `contents: write`, `copilot-requests: write`, inline
+Sync uses one job with `contents: write`, `copilot-requests: write`,
+`workflows: write`, inline
 `github-script` preparation, and Copilot CLI with `--model gpt-6-luna`. There
 is no post-agent content validation. The organization policy must permit
 [Copilot CLI requests in Actions](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions).

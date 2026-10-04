@@ -24,6 +24,7 @@ jobs:
     permissions:
       contents: write
       copilot-requests: write
+      workflows: write
     uses: ./.github/workflows/sync-repo-mirror.yml
     with:
       mirror: >-
