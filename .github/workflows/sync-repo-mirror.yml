@@ -247,10 +247,16 @@ jobs:
             git(["-c", `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`,
               "push", "mirror-target", `${base}:refs/heads/${process.env.STAGING_BRANCH}`]);
             core.setOutput("revision", `${base}..${head}`);
+            core.setOutput("head", head);
 
       - name: Sign agent-created patch commits
         id: sign
         if: steps.agent.outputs.commits != ''
+        # FIXME: GitHub's commit API cannot sign histories that contain
+        # executable files (https://github.com/orgs/community/discussions/191953),
+        # as openshift/os does with build-node-image.sh. Publish unsigned below
+        # until that limitation is resolved.
+        continue-on-error: true
         uses: pgaskin/push-signed-commits@v1.2.1
         with:
           path: ${{ steps.prepare.outputs.worktree }}
@@ -259,7 +265,7 @@ jobs:
           revision: ${{ steps.stage.outputs.revision }}
           github-token: ${{ github.token }}
 
-      - name: Publish signed mirror with a lease
+      - name: Publish mirror with a lease
         if: steps.agent.outputs.commits != ''
         uses: actions/github-script@v9
         env:
@@ -268,6 +274,7 @@ jobs:
           WORKTREE: ${{ steps.prepare.outputs.worktree }}
           OLD_HEAD: ${{ steps.prepare.outputs.old_head }}
           STAGING_BRANCH: ${{ steps.prepare.outputs.staging_branch }}
+          UNSIGNED_HEAD: ${{ steps.stage.outputs.head }}
           SIGNED_HEAD: ${{ steps.sign.outputs.pushed-oid }}
         with:
           script: |
@@ -279,10 +286,16 @@ jobs:
               `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`, ...args], {
               cwd: process.env.WORKTREE, stdio: ["ignore", "pipe", "pipe"],
             });
-            git(["fetch", "--no-tags", "mirror-target", `refs/heads/${process.env.STAGING_BRANCH}`]);
+            git(["fetch", "--no-tags", "mirror-target", `refs/heads/${process.env.STAGING_BRANCH}`]);            const signedHead = process.env.SIGNED_HEAD;
+            if (!signedHead) {
+              // FIXME: the signing action rejects histories with executable
+              // files, so publish the agent's unsigned commits instead.
+              core.warning("Signed commits are unavailable; publishing unsigned commits");
+            }
+            const head = signedHead || process.env.UNSIGNED_HEAD;
             git(["push", `--force-with-lease=refs/heads/${mirror.target_branch}:${process.env.OLD_HEAD}`,
-              "mirror-target", `${process.env.SIGNED_HEAD}:refs/heads/${mirror.target_branch}`]);
-            core.info(`Published ${mirror.target_branch} at ${process.env.SIGNED_HEAD}`);
+              "mirror-target", `${head}:refs/heads/${mirror.target_branch}`]);
+            core.info(`Published ${mirror.target_branch} at ${head}`);
 
       - name: Remove temporary publishing branch
         if: ${{ always() && steps.agent.outputs.commits != '' }}

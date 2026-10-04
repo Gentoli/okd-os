@@ -75,11 +75,15 @@ marker and compatibility commits there, and fetches the signed result. It
 updates only the mirror ref using an explicit force-with-lease against the
 observed mirror head (or requiring absence on creation).
 
-This permits rebased patches while retaining upstream commit IDs. A signing
-failure leaves the mirror unchanged. Another writer causes the lease to reject
-publication; rerun preparation against the new state. The temporary branch is
-removed on success or failure. Concurrency is scoped to the mirror branch,
-with queued calls for that branch. Native shared sources skip mirror sync.
+This permits rebased patches while retaining upstream commit IDs. FIXME:
+GitHub's signed-commit API refuses histories that contain executable files
+([community discussion](https://github.com/orgs/community/discussions/191953)),
+which affects `openshift/os` mirrors carrying `build-node-image.sh`, so a
+signing failure falls back to publishing the agent's unsigned commits with a
+warning. Another writer causes the lease to reject publication; rerun
+preparation against the new state. The temporary branch is removed on success
+or failure. Concurrency is scoped to the mirror branch, with queued calls for
+that branch. Native shared sources skip mirror sync.
 
 ## CRI-O EL9 example
 

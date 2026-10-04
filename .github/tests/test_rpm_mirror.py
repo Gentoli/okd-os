@@ -47,7 +47,7 @@ const customRequire = (name) => name === 'node:child_process' ? {
   },
 } : require(name);
 const core = { setOutput: (name, value) => { outputs[name] = value; },
-  info: () => {}, setSecret: () => {} };
+  info: () => {}, setSecret: () => {}, warning: () => {} };
 const github = input.releases ? { rest: { repos: {
   listReleases: async () => ({ data: input.releases }),
   getCommit: async ({ref}) => ({ data: { sha: ref + '-commit' } }),
@@ -317,7 +317,7 @@ class MirrorWorkflows(unittest.TestCase):
         head = self.git("rev-parse", "HEAD", cwd=worktree)
         self.git("push", "mirror-target", f"HEAD:refs/heads/{prepared['staging_branch']}", cwd=worktree)
         self.env["SIGNED_HEAD"] = head  # Simulate the signer's output; no API call.
-        publish_source = next(s["with"]["script"] for s in workflow("sync-repo-mirror.yml")["jobs"]["sync"]["steps"] if s.get("name") == "Publish signed mirror with a lease")
+        publish_source = next(s["with"]["script"] for s in workflow("sync-repo-mirror.yml")["jobs"]["sync"]["steps"] if s.get("name") == "Publish mirror with a lease")
         self.assertNotIn("error", self.run_script(publish_source))
         self.assertEqual(
             self.git("--git-dir", str(self.remote), "rev-parse",

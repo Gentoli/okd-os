@@ -224,6 +224,55 @@ class OsSourceMirror(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(result["outputs"]["commits"], f"{marker} {patch}")
 
+    def publish_script(self):
+        return next(
+            step["with"]["script"]
+            for step in workflow("sync-repo-mirror.yml")["jobs"]["sync"]["steps"]
+            if step.get("name") == "Publish mirror with a lease"
+        )
+
+    def test_publish_falls_back_to_unsigned_commits_when_signing_is_unavailable(self):
+        sign = next(
+            step for step in workflow("sync-repo-mirror.yml")["jobs"]["sync"]["steps"]
+            if step.get("name") == "Sign agent-created patch commits"
+        )
+        self.assertEqual(sign["continue-on-error"], "true")
+
+        request = self.request()
+        prepared = self.prepare(request)["outputs"]
+        worktree = Path(prepared["worktree"])
+        self.git("checkout", "-b", "mirror-patch", cwd=worktree)
+        (worktree / ".mirror-patch.json").write_text(json.dumps({"id": "fixture"}) + "\n")
+        self.commit(worktree, "PATCH/main")
+        marker_oid = self.git("rev-parse", "HEAD", cwd=worktree)
+        # The upstream build keeps build-node-image.sh executable, which the
+        # signed-commit API rejects.
+        node_image = worktree / "build-node-image.sh"
+        node_image.write_text("#!/bin/sh\n")
+        node_image.chmod(0o755)
+        self.commit(worktree, "Adapt the node image build")
+        patch_oid = self.git("rev-parse", "HEAD", cwd=worktree)
+
+        self.env.update({
+            "WORKTREE": str(worktree),
+            "COMMITS": f"{marker_oid} {patch_oid}",
+            "STAGING_BRANCH": prepared["staging_branch"],
+        })
+        self.assertNotIn("error", self.run_script(script("sync-repo-mirror.yml", "sync", "stage")))
+
+        self.env.update({
+            "MIRROR": json.dumps(request),
+            "OLD_HEAD": "",
+            "SIGNED_HEAD": "",
+            "UNSIGNED_HEAD": patch_oid,
+        })
+        self.assertNotIn("error", self.run_script(self.publish_script()))
+        self.assertEqual(
+            self.git("--git-dir", str(self.remote), "rev-parse",
+                     f"refs/heads/{request['target_branch']}"),
+            patch_oid,
+        )
+
     def test_publish_creates_branch_and_lease_rejects_concurrent_creation(self):
         request = self.request()
         prepared = self.prepare(request)["outputs"]
@@ -268,11 +317,7 @@ class OsSourceMirror(unittest.TestCase):
             "OLD_HEAD": "",
             "SIGNED_HEAD": patch_oid,
         })
-        publish = next(
-            step["with"]["script"]
-            for step in workflow("sync-repo-mirror.yml")["jobs"]["sync"]["steps"]
-            if step.get("name") == "Publish signed mirror with a lease"
-        )
+        publish = self.publish_script()
         self.assertNotIn("error", self.run_script(publish))
         target_ref = f"refs/heads/{request['target_branch']}"
         self.assertEqual(self.git("--git-dir", str(self.remote), "rev-parse", target_ref), patch_oid)
